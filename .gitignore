@@ -1,0 +1,12 @@
+__pycache__/
+build/
+downloads/
+direct_case/
+direct_downloads/
+*.pyc
+app_gui_smoke.txt
+dist_smoke.txt
+desktop_exe_smoke.txt
+_format_message_test_clip.mp4
+dist/RCXC*.tmp
+dist/downloads/
