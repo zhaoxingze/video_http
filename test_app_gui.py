@@ -1,7 +1,14 @@
 import unittest
 from pathlib import Path
 
-from app_gui import default_font_spec, format_finished_message, is_probable_url, make_output_name
+from app_gui import (
+    default_font_spec,
+    field_specs,
+    format_finished_message,
+    is_probable_url,
+    make_output_name,
+    primary_button_options,
+)
 
 
 class AppGuiHelperTests(unittest.TestCase):
@@ -21,6 +28,20 @@ class AppGuiHelperTests(unittest.TestCase):
 
     def test_default_font_spec_uses_tuple_for_font_family_with_spaces(self):
         self.assertEqual(default_font_spec(), ("Microsoft YaHei UI", 10))
+
+    def test_field_specs_attach_filename_hint_to_filename_input(self):
+        filename = field_specs()["name"]
+
+        self.assertEqual(filename.placeholder, "留空则使用视频标题")
+        self.assertEqual(filename.inline_help, "")
+
+    def test_primary_button_options_make_download_action_visually_dominant(self):
+        options = primary_button_options()
+
+        self.assertEqual(options["bg"], "#2563eb")
+        self.assertEqual(options["fg"], "#ffffff")
+        self.assertGreaterEqual(options["font"][1], 12)
+        self.assertEqual(options["font"][2], "bold")
 
     def test_format_finished_message_includes_path_and_size(self):
         path = Path.cwd() / "_format_message_test_clip.mp4"
