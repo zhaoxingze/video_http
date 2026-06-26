@@ -43,6 +43,40 @@ def default_font_spec() -> tuple[str, int]:
     return ("Microsoft YaHei UI", 10)
 
 
+def ui_palette() -> dict[str, str]:
+    return {
+        "background": "#eef5ff",
+        "surface": "#fbfdff",
+        "surface_muted": "#f3f8ff",
+        "primary": "#0078d7",
+        "primary_dark": "#005faf",
+        "accent": "#21b7d7",
+        "text": "#121826",
+        "muted": "#6b7280",
+        "line": "#d7e2ee",
+        "shadow": "#c9d8e8",
+        "preview": "#18202b",
+    }
+
+
+def window_config() -> dict[str, object]:
+    return {
+        "geometry": "960x620",
+        "minsize": (860, 560),
+        "title_font": ("Microsoft YaHei UI", 24, "bold"),
+        "subtitle_font": ("Microsoft YaHei UI", 12),
+    }
+
+
+def platform_badges() -> list[dict[str, str]]:
+    return [
+        {"text": "Y", "bg": "#ff0000", "fg": "#ffffff"},
+        {"text": "B", "bg": "#fb7299", "fg": "#ffffff"},
+        {"text": "D", "bg": "#111827", "fg": "#ffffff"},
+        {"text": "V", "bg": "#20b9d8", "fg": "#ffffff"},
+    ]
+
+
 @dataclass(frozen=True)
 class FieldSpec:
     label: str
@@ -54,8 +88,8 @@ def field_specs() -> dict[str, FieldSpec]:
     return {
         "url": FieldSpec(
             label="网址链接",
-            placeholder="粘贴网页地址或视频地址",
-            inline_help="支持普通视频链接，也会尝试识别网页里的视频源。",
+            placeholder="请输入网址链接 (https://...)",
+            inline_help="https://...",
         ),
         "output_dir": FieldSpec(
             label="保存目录",
@@ -67,19 +101,20 @@ def field_specs() -> dict[str, FieldSpec]:
 
 
 def primary_button_options() -> dict[str, object]:
+    palette = ui_palette()
     return {
-        "bg": "#2563eb",
+        "bg": palette["primary"],
         "fg": "#ffffff",
-        "activebackground": "#1d4ed8",
+        "activebackground": palette["primary_dark"],
         "activeforeground": "#ffffff",
         "disabledforeground": "#e0ecff",
-        "font": ("Microsoft YaHei UI", 12, "bold"),
+        "font": ("Microsoft YaHei UI", 13, "bold"),
         "relief": tk.FLAT,
         "bd": 0,
         "cursor": "hand2",
         "highlightthickness": 0,
-        "padx": 28,
-        "pady": 12,
+        "padx": 30,
+        "pady": 18,
     }
 
 
@@ -118,11 +153,13 @@ def format_finished_message(path: Path) -> str:
 
 class VideoDownloaderApp:
     def __init__(self, root: tk.Tk):
+        palette = ui_palette()
+        config = window_config()
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("780x560")
-        self.root.minsize(720, 500)
-        self.root.configure(bg="#f4f7fb")
+        self.root.geometry(str(config["geometry"]))
+        self.root.minsize(*config["minsize"])
+        self.root.configure(bg=palette["background"])
         self.root.option_add("*Font", default_font_spec())
 
         self.url_var = tk.StringVar()
@@ -149,66 +186,93 @@ class VideoDownloaderApp:
                 pass
 
     def _configure_styles(self) -> None:
+        palette = ui_palette()
         style = ttk.Style(self.root)
         try:
             style.theme_use("clam")
         except tk.TclError:
             pass
-        style.configure("App.TFrame", background="#f4f7fb")
-        style.configure("Header.TFrame", background="#f4f7fb")
-        style.configure("Title.TLabel", background="#f4f7fb", foreground="#172033", font=("Microsoft YaHei UI", 18, "bold"))
-        style.configure("Subtitle.TLabel", background="#f4f7fb", foreground="#5d6b82", font=("Microsoft YaHei UI", 10))
-        style.configure("Horizontal.TProgressbar", troughcolor="#e8eef7", background="#2563eb", bordercolor="#e8eef7")
+        config = window_config()
+        style.configure("App.TFrame", background=palette["background"])
+        style.configure("Header.TFrame", background=palette["background"])
+        style.configure("Title.TLabel", background=palette["background"], foreground=palette["text"], font=config["title_font"])
+        style.configure("Subtitle.TLabel", background=palette["background"], foreground=palette["muted"], font=config["subtitle_font"])
+        style.configure("Horizontal.TProgressbar", troughcolor="#e4f5fb", background=palette["accent"], bordercolor="#e4f5fb")
 
     def _build_ui(self) -> None:
-        outer = ttk.Frame(self.root, style="App.TFrame", padding=(30, 22))
+        palette = ui_palette()
+        outer = ttk.Frame(self.root, style="App.TFrame", padding=(32, 24, 32, 28))
         outer.pack(fill=tk.BOTH, expand=True)
         outer.columnconfigure(0, weight=1)
         outer.rowconfigure(1, weight=1)
 
         header = ttk.Frame(outer, style="Header.TFrame")
-        header.grid(row=0, column=0, sticky=tk.EW, pady=(0, 18))
+        header.grid(row=0, column=0, sticky=tk.EW, pady=(0, 22))
         header.columnconfigure(1, weight=1)
 
+        logo_tile = tk.Frame(header, bg=palette["background"], width=82, height=82)
+        logo_tile.grid(row=0, column=0, rowspan=2, sticky=tk.W, padx=(0, 18))
+        logo_tile.grid_propagate(False)
         logo = self._load_logo()
         if logo is not None:
-            ttk.Label(header, image=logo, background="#f4f7fb").grid(row=0, column=0, rowspan=2, sticky=tk.W, padx=(0, 13))
+            tk.Label(logo_tile, image=logo, bg=palette["background"]).place(relx=0.5, rely=0.5, anchor=tk.CENTER)
+        else:
+            self._draw_logo_placeholder(logo_tile)
         ttk.Label(header, text=APP_TITLE, style="Title.TLabel").grid(row=0, column=1, sticky=tk.W)
         ttk.Label(header, text="粘贴链接，保存视频文件", style="Subtitle.TLabel").grid(row=1, column=1, sticky=tk.W, pady=(2, 0))
 
-        shadow = tk.Frame(outer, bg="#dbe5f1", bd=0)
+        settings_button = tk.Button(
+            header,
+            text="设置",
+            command=self._show_settings_placeholder,
+            bg=palette["background"],
+            fg=palette["text"],
+            activebackground="#e3efff",
+            activeforeground=palette["text"],
+            font=("Microsoft YaHei UI", 10),
+            relief=tk.FLAT,
+            bd=0,
+            cursor="hand2",
+            padx=12,
+            pady=8,
+        )
+        settings_button.grid(row=0, column=2, rowspan=2, sticky=tk.NE, padx=(14, 0))
+
+        shadow = tk.Frame(outer, bg=palette["shadow"], bd=0)
         shadow.grid(row=1, column=0, sticky=tk.NSEW)
         shadow.columnconfigure(0, weight=1)
         shadow.rowconfigure(0, weight=1)
 
-        card = tk.Frame(shadow, bg="#ffffff", bd=0, highlightthickness=0)
-        card.grid(row=0, column=0, sticky=tk.NSEW, padx=(0, 4), pady=(0, 4))
-        card.columnconfigure(0, weight=1)
-        card.rowconfigure(6, weight=1)
+        card = tk.Frame(shadow, bg=palette["surface"], bd=0, highlightthickness=1, highlightbackground="#dfe8f2")
+        card.grid(row=0, column=0, sticky=tk.NSEW, padx=(0, 5), pady=(0, 5))
+        card.columnconfigure(0, minsize=180)
+        card.columnconfigure(1, weight=1)
+        card.columnconfigure(2, minsize=190)
+        card.rowconfigure(3, weight=1)
 
         specs = field_specs()
-        self._add_field(card, 0, specs["url"], self.url_var)
-        self._add_field(card, 1, specs["output_dir"], self.output_dir_var, self._choose_output_dir)
-        self._add_field(card, 2, specs["name"], self.name_var)
+        preview = self._build_preview(card)
+        preview.grid(row=0, column=0, rowspan=3, sticky=tk.NW, padx=(26, 18), pady=(32, 0))
 
-        action_row = tk.Frame(card, bg="#ffffff")
-        action_row.grid(row=3, column=0, sticky=tk.EW, padx=26, pady=(22, 10))
-        action_row.columnconfigure(0, weight=1)
+        form = tk.Frame(card, bg=palette["surface"])
+        form.grid(row=0, column=1, sticky=tk.NSEW, pady=(24, 0))
+        form.columnconfigure(0, weight=1)
+        self._add_field(form, 0, specs["url"], self.url_var, show_badges=True)
+        self._add_field(form, 1, specs["output_dir"], self.output_dir_var, self._choose_output_dir)
+        self._add_field(form, 2, specs["name"], self.name_var)
 
-        self.download_button = tk.Button(action_row, text="开始下载", command=self._start_download, **primary_button_options())
-        self.download_button.grid(row=0, column=0, sticky=tk.EW)
+        action_panel = tk.Frame(card, bg=palette["surface"])
+        action_panel.grid(row=0, column=2, rowspan=3, sticky=tk.NSEW, padx=(22, 28), pady=(58, 0))
+        action_panel.columnconfigure(0, weight=1)
 
-        self.progress = ttk.Progressbar(card, mode="indeterminate", style="Horizontal.TProgressbar")
-        self.progress.grid(row=4, column=0, sticky=tk.EW, padx=26, pady=(0, 12))
+        self.download_button = tk.Button(action_panel, text="下载\n开始下载", command=self._start_download, **primary_button_options())
+        self.download_button.grid(row=0, column=0, sticky=tk.EW, ipady=10)
 
-        secondary_row = tk.Frame(card, bg="#ffffff")
-        secondary_row.grid(row=5, column=0, sticky=tk.EW, padx=26, pady=(0, 16))
-        secondary_row.columnconfigure(0, weight=1)
         self.open_folder_button = tk.Button(
-            secondary_row,
+            action_panel,
             text="打开保存目录",
             command=self._open_output_folder,
-            bg="#eef4fb",
+            bg="#eef6ff",
             fg="#334155",
             activebackground="#dbeafe",
             activeforeground="#1f2937",
@@ -220,36 +284,39 @@ class VideoDownloaderApp:
             padx=14,
             pady=7,
         )
-        self.open_folder_button.grid(row=0, column=0, sticky=tk.E)
+        self.open_folder_button.grid(row=1, column=0, sticky=tk.EW, pady=(18, 0))
 
-        status_box = tk.Frame(card, bg="#ffffff")
-        status_box.grid(row=6, column=0, sticky=tk.NSEW, padx=26, pady=(0, 24))
+        status_box = tk.Frame(card, bg=palette["surface"])
+        status_box.grid(row=3, column=0, columnspan=3, sticky=tk.NSEW, padx=26, pady=(24, 22))
         status_box.columnconfigure(0, weight=1)
-        status_box.rowconfigure(1, weight=1)
+        status_box.rowconfigure(2, weight=1)
 
         tk.Label(
             status_box,
-            text="状态",
-            bg="#ffffff",
-            fg="#243044",
+            text="下载状态",
+            bg=palette["surface"],
+            fg=palette["text"],
             font=("Microsoft YaHei UI", 10, "bold"),
         ).grid(row=0, column=0, sticky=tk.W, pady=(0, 8))
 
-        status_shell = tk.Frame(status_box, bg="#f8fafc", bd=0, highlightthickness=1, highlightbackground="#e4ebf5")
-        status_shell.grid(row=1, column=0, sticky=tk.NSEW)
+        self.progress = ttk.Progressbar(status_box, mode="indeterminate", style="Horizontal.TProgressbar")
+        self.progress.grid(row=1, column=0, sticky=tk.EW, pady=(0, 10))
+
+        status_shell = tk.Frame(status_box, bg=palette["surface_muted"], bd=0, highlightthickness=1, highlightbackground=palette["line"])
+        status_shell.grid(row=2, column=0, sticky=tk.NSEW)
         status_shell.columnconfigure(0, weight=1)
         status_shell.rowconfigure(0, weight=1)
 
         self.status_text = tk.Text(
             status_shell,
-            height=7,
+            height=4,
             wrap=tk.WORD,
             relief=tk.FLAT,
-            bg="#f8fafc",
-            fg="#243044",
-            insertbackground="#243044",
-            padx=10,
-            pady=8,
+            bg=palette["surface_muted"],
+            fg=palette["text"],
+            insertbackground=palette["text"],
+            padx=12,
+            pady=10,
             state=tk.DISABLED,
         )
         self.status_text.grid(row=0, column=0, sticky=tk.NSEW)
@@ -268,6 +335,29 @@ class VideoDownloaderApp:
         except tk.TclError:
             return None
 
+    def _draw_logo_placeholder(self, parent: tk.Widget) -> None:
+        palette = ui_palette()
+        canvas = tk.Canvas(parent, width=74, height=74, bg=palette["background"], highlightthickness=0)
+        canvas.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
+        canvas.create_rectangle(7, 7, 67, 67, fill=palette["primary"], outline=palette["primary"])
+        canvas.create_oval(19, 24, 48, 53, fill="#ffffff", outline="#ffffff")
+        canvas.create_polygon(47, 28, 61, 37, 47, 46, fill="#7dd3fc", outline="#7dd3fc")
+
+    def _build_preview(self, parent: tk.Widget) -> tk.Canvas:
+        palette = ui_palette()
+        canvas = tk.Canvas(parent, width=168, height=118, bg=palette["surface"], highlightthickness=0)
+        canvas.create_rectangle(4, 4, 164, 112, fill=palette["preview"], outline="#0f172a")
+        canvas.create_rectangle(4, 4, 164, 30, fill="#263241", outline="#263241")
+        canvas.create_text(84, 18, text="视频预览", fill="#d7e5f2", font=("Microsoft YaHei UI", 9, "bold"))
+        canvas.create_oval(61, 39, 107, 85, fill="#ffffff", outline="#ffffff")
+        canvas.create_polygon(79, 51, 79, 73, 98, 62, fill=palette["primary"], outline=palette["primary"])
+        canvas.create_rectangle(18, 94, 70, 100, fill="#334155", outline="#334155")
+        canvas.create_rectangle(18, 102, 118, 106, fill="#1e293b", outline="#1e293b")
+        return canvas
+
+    def _show_settings_placeholder(self) -> None:
+        messagebox.showinfo(APP_TITLE, "当前版本无需额外设置。")
+
     def _add_field(
         self,
         parent: tk.Widget,
@@ -275,38 +365,40 @@ class VideoDownloaderApp:
         spec: FieldSpec,
         variable: tk.StringVar,
         button_command=None,
+        show_badges: bool = False,
     ) -> None:
-        top_pad = 24 if row == 0 else 14
-        field = tk.Frame(parent, bg="#ffffff")
-        field.grid(row=row, column=0, sticky=tk.EW, padx=26, pady=(top_pad, 0))
+        palette = ui_palette()
+        top_pad = 4 if row == 0 else 12
+        field = tk.Frame(parent, bg=palette["surface"])
+        field.grid(row=row, column=0, sticky=tk.EW, pady=(top_pad, 0))
         field.columnconfigure(0, weight=1)
 
         tk.Label(
             field,
             text=spec.label,
-            bg="#ffffff",
-            fg="#243044",
+            bg=palette["surface"],
+            fg=palette["text"],
             font=("Microsoft YaHei UI", 10, "bold"),
-        ).grid(row=0, column=0, sticky=tk.W, pady=(0, 7))
+        ).grid(row=0, column=0, sticky=tk.W, pady=(0, 6))
 
-        input_row = tk.Frame(field, bg="#ffffff")
+        input_row = tk.Frame(field, bg=palette["surface"])
         input_row.grid(row=1, column=0, sticky=tk.EW)
         input_row.columnconfigure(0, weight=1)
 
-        entry_shell = tk.Frame(input_row, bg="#f8fafc", bd=0, highlightthickness=1, highlightbackground="#e4ebf5", highlightcolor="#93c5fd")
+        entry_shell = tk.Frame(input_row, bg="#ffffff", bd=0, highlightthickness=1, highlightbackground=palette["line"], highlightcolor=palette["accent"])
         entry_shell.grid(row=0, column=0, sticky=tk.EW)
         entry = tk.Entry(
             entry_shell,
             textvariable=variable,
-            bg="#f8fafc",
-            fg="#243044",
-            insertbackground="#243044",
+            bg="#ffffff",
+            fg=palette["text"],
+            insertbackground=palette["text"],
             relief=tk.FLAT,
             bd=0,
             highlightthickness=0,
             font=default_font_spec(),
         )
-        entry.pack(fill=tk.X, padx=12, pady=10)
+        entry.pack(fill=tk.X, padx=12, pady=9)
         self._install_placeholder(entry, variable, spec.placeholder)
 
         if button_command is not None:
@@ -314,7 +406,7 @@ class VideoDownloaderApp:
                 input_row,
                 text="浏览",
                 command=button_command,
-                bg="#eef4fb",
+                bg="#eef6ff",
                 fg="#334155",
                 activebackground="#dbeafe",
                 activeforeground="#1f2937",
@@ -326,14 +418,30 @@ class VideoDownloaderApp:
                 padx=14,
                 pady=9,
             ).grid(row=0, column=1, sticky=tk.E, padx=(10, 0))
+        elif show_badges:
+            badge_row = tk.Frame(input_row, bg=palette["surface"])
+            badge_row.grid(row=0, column=1, sticky=tk.E, padx=(10, 0))
+            self._add_platform_badges(badge_row)
         if spec.inline_help:
             tk.Label(
                 field,
                 text=spec.inline_help,
-                bg="#ffffff",
-                fg="#728096",
+                bg=palette["surface"],
+                fg=palette["muted"],
                 font=("Microsoft YaHei UI", 9),
             ).grid(row=2, column=0, sticky=tk.W, pady=(6, 0))
+
+    def _add_platform_badges(self, parent: tk.Widget) -> None:
+        for column, badge in enumerate(platform_badges()):
+            tk.Label(
+                parent,
+                text=badge["text"],
+                bg=badge["bg"],
+                fg=badge["fg"],
+                font=("Microsoft YaHei UI", 9, "bold"),
+                width=2,
+                height=1,
+            ).grid(row=0, column=column, padx=(0 if column == 0 else 5, 0))
 
     def _install_placeholder(self, entry: tk.Entry, variable: tk.StringVar, placeholder: str) -> None:
         if not placeholder:
@@ -440,7 +548,7 @@ class VideoDownloaderApp:
     def _set_download_button_busy(self, busy: bool) -> None:
         if busy:
             self.download_button.configure(
-                text="下载中...",
+                text="下载中...\n请稍候",
                 state=tk.DISABLED,
                 bg="#93c5fd",
                 activebackground="#93c5fd",
@@ -449,7 +557,7 @@ class VideoDownloaderApp:
 
         options = primary_button_options()
         self.download_button.configure(
-            text="开始下载",
+            text="下载\n开始下载",
             state=tk.NORMAL,
             bg=options["bg"],
             activebackground=options["activebackground"],

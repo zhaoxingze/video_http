@@ -7,7 +7,10 @@ from app_gui import (
     format_finished_message,
     is_probable_url,
     make_output_name,
+    platform_badges,
     primary_button_options,
+    ui_palette,
+    window_config,
 )
 
 
@@ -38,10 +41,31 @@ class AppGuiHelperTests(unittest.TestCase):
     def test_primary_button_options_make_download_action_visually_dominant(self):
         options = primary_button_options()
 
-        self.assertEqual(options["bg"], "#2563eb")
+        self.assertEqual(options["bg"], ui_palette()["primary"])
         self.assertEqual(options["fg"], "#ffffff")
         self.assertGreaterEqual(options["font"][1], 12)
         self.assertEqual(options["font"][2], "bold")
+
+    def test_window_config_uses_reference_image_scale(self):
+        config = window_config()
+
+        self.assertEqual(config["geometry"], "960x620")
+        self.assertEqual(config["minsize"], (860, 560))
+        self.assertGreaterEqual(config["title_font"][1], 22)
+
+    def test_ui_palette_matches_light_glass_download_style(self):
+        palette = ui_palette()
+
+        self.assertEqual(palette["primary"], "#0078d7")
+        self.assertEqual(palette["background"], "#eef5ff")
+        self.assertEqual(palette["surface"], "#fbfdff")
+        self.assertEqual(palette["accent"], "#21b7d7")
+
+    def test_platform_badges_show_common_video_sources(self):
+        badges = platform_badges()
+
+        self.assertEqual([badge["text"] for badge in badges], ["Y", "B", "D", "V"])
+        self.assertTrue(all(badge["bg"].startswith("#") for badge in badges))
 
     def test_format_finished_message_includes_path_and_size(self):
         path = Path.cwd() / "_format_message_test_clip.mp4"
