@@ -1,10 +1,14 @@
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from downloader import (
     build_cctv_variant_candidates,
+    build_yt_dlp_options,
+    download_resolved_video,
     discover_candidates,
     extract_cctv_video_center_id,
+    ResolvedVideo,
     parse_hls_master,
     resolve_url,
     sanitize_filename,
@@ -104,6 +108,31 @@ class DownloaderDiscoveryTests(unittest.TestCase):
         self.assertEqual(video.kind, "platform-video")
         self.assertEqual(video.source, "yt-dlp")
         self.assertEqual(video.url, "https://www.bilibili.com/video/BV1jL5F6PEog/")
+
+
+def test_builds_yt_dlp_options_for_mp4_merge():
+    options = build_yt_dlp_options(Path("C:/Downloads"), "my_clip", "C:/ffmpeg.exe")
+
+    assert options["format"] == "bv*+ba/b"
+    assert options["merge_output_format"] == "mp4"
+    assert options["ffmpeg_location"] == "C:/ffmpeg.exe"
+    assert options["noplaylist"] is True
+    assert "my_clip" in str(options["outtmpl"])
+
+
+def test_platform_video_dispatches_to_platform_adapter():
+    video = ResolvedVideo(
+        url="https://example.com/watch/abc",
+        kind="platform-video",
+        title="Platform clip",
+        source="yt-dlp",
+    )
+
+    with patch("downloader.download_platform_video", return_value=Path("C:/Downloads/my_clip.mp4")) as mocked:
+        result = download_resolved_video(video, Path("C:/Downloads"), "my_clip")
+
+    mocked.assert_called_once_with("https://example.com/watch/abc", Path("C:/Downloads"), "my_clip")
+    assert result == Path("C:/Downloads/my_clip.mp4")
 
 
 if __name__ == "__main__":

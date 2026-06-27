@@ -1,3 +1,4 @@
 imageio-ffmpeg>=0.6.0
 pyinstaller>=6.0
 pillow>=10.0
+yt-dlp>=2025.1.15

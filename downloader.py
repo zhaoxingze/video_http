@@ -13,7 +13,7 @@ import sys
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urljoin, urlparse
 from urllib.request import Request, urlopen
@@ -368,9 +368,34 @@ def download_resolved_video(video: ResolvedVideo, output_dir: Path, output_name:
     output_dir.mkdir(parents=True, exist_ok=True)
     base_name = sanitize_filename(output_name or video.title or filename_from_url(video.url) or "downloaded_video")
 
+    if video.kind == "platform-video":
+        return download_platform_video(video.url, output_dir, base_name)
     if video.kind == "hls":
         return download_hls(video.url, output_dir, base_name)
     return download_direct(video.url, output_dir, base_name)
+
+
+def build_yt_dlp_options(output_dir: Path, base_name: str, ffmpeg: str) -> dict[str, object]:
+    return {
+        "format": "bv*+ba/b",
+        "merge_output_format": "mp4",
+        "ffmpeg_location": ffmpeg,
+        "outtmpl": str(output_dir / f"{base_name}.%(ext)s"),
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "windowsfilenames": True,
+    }
+
+
+def download_platform_video(
+    url: str,
+    output_dir: Path,
+    base_name: str,
+    *,
+    ydl_factory: Callable[[dict[str, object]], object] | None = None,
+) -> Path:
+    raise DownloadError("平台视频下载适配器尚未实现。")
 
 
 def download_direct(url: str, output_dir: Path, base_name: str) -> Path:
