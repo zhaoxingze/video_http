@@ -25,6 +25,7 @@ USER_AGENT = (
 )
 
 VIDEO_EXTENSIONS = (".mp4", ".m4v", ".mov", ".webm", ".flv", ".ts")
+FINAL_VIDEO_EXTENSIONS = VIDEO_EXTENSIONS + (".mkv",)
 HLS_EXTENSION = ".m3u8"
 MEDIA_RE = re.compile(
     r"(?P<url>(?:(?:https?:)?//|/)[^'\"\s<>\\]+?"
@@ -388,6 +389,36 @@ def build_yt_dlp_options(output_dir: Path, base_name: str, ffmpeg: str) -> dict[
     }
 
 
+def iter_existing_base_paths(output_dir: Path, base_name: str) -> Iterable[Path]:
+    if not output_dir.exists():
+        return []
+
+    target_name = base_name.casefold()
+    target_prefix = f"{base_name}.".casefold()
+    return [
+        entry
+        for entry in output_dir.iterdir()
+        if entry.name.casefold() == target_name or entry.name.casefold().startswith(target_prefix)
+    ]
+
+
+def unique_output_base(output_dir: Path, base_name: str) -> str:
+    for index in range(1, 10_000):
+        candidate = base_name if index == 1 else f"{base_name}_{index}"
+        if not any(iter_existing_base_paths(output_dir, candidate)):
+            return candidate
+    raise DownloadError(f"无法生成不重复的平台输出文件名：{output_dir / base_name}")
+
+
+def is_completed_media_file(path: Path) -> bool:
+    lower_suffixes = [suffix.lower() for suffix in path.suffixes]
+    if not lower_suffixes:
+        return False
+    if any(suffix in {".part", ".ytdl"} for suffix in lower_suffixes):
+        return False
+    return lower_suffixes[-1] in FINAL_VIDEO_EXTENSIONS
+
+
 def download_platform_video(
     page_url: str,
     output_dir: Path,
@@ -408,7 +439,7 @@ def download_platform_video(
             raise DownloadError("程序缺少 yt-dlp 平台解析组件，请重新安装或重新打包。") from exc
         ydl_factory = YoutubeDL
 
-    unique_name = unique_path(output_dir / f"{base_name}.mp4").stem
+    unique_name = unique_output_base(output_dir, base_name)
     options = build_yt_dlp_options(output_dir, unique_name, ffmpeg)
     finished_paths: list[Path] = []
 
@@ -443,7 +474,7 @@ def download_platform_video(
                     remember_candidate(item.get("filepath"))
         candidate_paths = list(finished_paths)
 
-    candidate_paths.extend(output_dir.glob(f"{unique_name}.*"))
+    candidate_paths.extend(iter_existing_base_paths(output_dir, unique_name))
 
     seen: set[Path] = set()
     completed: list[Path] = []
@@ -454,7 +485,7 @@ def download_platform_video(
         seen.add(resolved)
         if not resolved.is_file():
             continue
-        if resolved.suffix.lower() in {".part", ".ytdl"}:
+        if not is_completed_media_file(resolved):
             continue
         completed.append(resolved)
 

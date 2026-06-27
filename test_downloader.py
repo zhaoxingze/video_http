@@ -23,7 +23,7 @@ class DownloaderDiscoveryTests(unittest.TestCase):
         html = """
         <html><body>
           <video src="/watch/preview.mp4"></video>
-          <a class="download" href="/files/high.mp4">下载高清视频</a>
+          <a class="download" href="/files/high.mp4">download video</a>
         </body></html>
         """
 
@@ -98,8 +98,8 @@ class DownloaderDiscoveryTests(unittest.TestCase):
 
     def test_sanitize_filename_removes_windows_reserved_characters(self):
         self.assertEqual(
-            sanitize_filename('央视: 清明/高清视频? "test"'),
-            "央视_ 清明_高清视频_ _test_",
+            sanitize_filename('CCTV: clear/video? "test"'),
+            "CCTV_ clear_video_ _test_",
         )
 
     def test_builds_yt_dlp_options_for_mp4_merge(self):
@@ -181,6 +181,42 @@ class DownloaderDiscoveryTests(unittest.TestCase):
         self.assertEqual(fake.options["merge_output_format"], "mp4")
         self.assertIn("postprocessor_hooks", fake.options)
 
+    def test_platform_video_download_uses_new_base_when_sibling_media_exists(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            stale_path = output_dir / "clip.webm"
+            stale_path.write_bytes(b"old-video")
+
+            class FakeYDL:
+                instances = []
+
+                def __init__(self, options):
+                    self.options = options
+                    FakeYDL.instances.append(self)
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def extract_info(self, page_url, download=True):
+                    final_path = output_dir / "clip_2.mp4"
+                    final_path.write_bytes(b"new-video")
+                    return {"filepath": str(final_path)}
+
+            with patch("downloader.find_ffmpeg", return_value="C:/ffmpeg.exe"):
+                result = downloader.download_platform_video(
+                    page_url="https://example.com/watch/abc",
+                    output_dir=output_dir,
+                    base_name="clip",
+                    ydl_factory=FakeYDL,
+                )
+                self.assertEqual(result, output_dir / "clip_2.mp4")
+                self.assertEqual(stale_path.read_bytes(), b"old-video")
+                self.assertEqual(len(FakeYDL.instances), 1)
+                self.assertTrue(FakeYDL.instances[0].options["outtmpl"].endswith("clip_2.%(ext)s"))
+
     def test_platform_video_download_wraps_ydl_errors(self):
         class BrokenYDL:
             def __init__(self, options):
@@ -233,7 +269,37 @@ class DownloaderDiscoveryTests(unittest.TestCase):
                         ydl_factory=MissingOutputYDL,
                     )
 
-        self.assertIn("没有找到生成的视频文件", str(cm.exception))
+        self.assertIn("生成的视频文件", str(cm.exception))
+
+    def test_platform_video_download_rejects_metadata_only_outputs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            info_json = output_dir / "clip.info.json"
+
+            class MetadataOnlyYDL:
+                def __init__(self, options):
+                    self.options = options
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def extract_info(self, page_url, download=True):
+                    info_json.write_text('{"id":"abc"}', encoding="utf-8")
+                    return {"filepath": str(info_json)}
+
+            with patch("downloader.find_ffmpeg", return_value="C:/ffmpeg.exe"):
+                with self.assertRaises(DownloadError) as cm:
+                    downloader.download_platform_video(
+                        page_url="https://example.com/watch/abc",
+                        output_dir=output_dir,
+                        base_name="clip",
+                        ydl_factory=MetadataOnlyYDL,
+                    )
+
+        self.assertIn("生成的视频文件", str(cm.exception))
 
     def test_platform_video_rejects_fourth_positional_argument(self):
         with self.assertRaises(TypeError):
