@@ -1,4 +1,5 @@
 __pycache__/
+.worktrees/
 build/
 downloads/
 direct_case/
