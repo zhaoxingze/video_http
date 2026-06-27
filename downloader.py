@@ -395,7 +395,75 @@ def download_platform_video(
     *,
     ydl_factory: Callable[[dict[str, object]], object] | None = None,
 ) -> Path:
-    raise DownloadError("平台视频下载适配器尚未实现。")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        raise DownloadError("需要 FFmpeg 才能合并平台高清视频和音频。请先安装 FFmpeg 后重试。")
+
+    if ydl_factory is None:
+        try:
+            from yt_dlp import YoutubeDL
+        except ImportError as exc:
+            raise DownloadError("程序缺少 yt-dlp 平台解析组件，请重新安装或重新打包。") from exc
+        ydl_factory = YoutubeDL
+
+    unique_name = unique_path(output_dir / f"{base_name}.mp4").stem
+    options = build_yt_dlp_options(output_dir, unique_name, ffmpeg)
+    finished_paths: list[Path] = []
+
+    def remember_candidate(value: object) -> None:
+        if value:
+            finished_paths.append(Path(str(value)))
+
+    def remember_finished(item: dict[str, object]) -> None:
+        if item.get("status") != "finished":
+            return
+        remember_candidate(item.get("filepath"))
+        info = item.get("info_dict")
+        if isinstance(info, dict):
+            remember_candidate(info.get("filepath"))
+
+    options["postprocessor_hooks"] = [remember_finished]
+
+    try:
+        with ydl_factory(options) as ydl:
+            info = ydl.extract_info(page_url, download=True)
+    except Exception as exc:
+        raise DownloadError(f"平台视频下载失败：{exc}") from exc
+
+    candidate_paths = list(finished_paths)
+    if isinstance(info, dict):
+        remember_candidate(info.get("filepath"))
+        remember_candidate(info.get("_filename"))
+        requested_downloads = info.get("requested_downloads")
+        if isinstance(requested_downloads, list):
+            for item in requested_downloads:
+                if isinstance(item, dict):
+                    remember_candidate(item.get("filepath"))
+        candidate_paths = list(finished_paths)
+
+    candidate_paths.extend(output_dir.glob(f"{unique_name}.*"))
+
+    seen: set[Path] = set()
+    completed: list[Path] = []
+    for candidate in candidate_paths:
+        resolved = Path(candidate)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if not resolved.is_file():
+            continue
+        if resolved.suffix.lower() in {".part", ".ytdl"}:
+            continue
+        completed.append(resolved)
+
+    mp4_candidates = [path for path in completed if path.suffix.lower() == ".mp4"]
+    if mp4_candidates:
+        return max(mp4_candidates, key=lambda path: path.stat().st_mtime_ns)
+    if completed:
+        return max(completed, key=lambda path: path.stat().st_mtime_ns)
+    raise DownloadError("平台下载结束，但没有找到生成的视频文件。")
 
 
 def download_direct(url: str, output_dir: Path, base_name: str) -> Path:
