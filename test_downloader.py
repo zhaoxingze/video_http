@@ -23,7 +23,7 @@ class DownloaderDiscoveryTests(unittest.TestCase):
         html = """
         <html><body>
           <video src="/watch/preview.mp4"></video>
-          <a class="download" href="/files/high.mp4">download video</a>
+          <a class="download" href="/files/high.mp4">下载高清视频</a>
         </body></html>
         """
 
@@ -98,8 +98,8 @@ class DownloaderDiscoveryTests(unittest.TestCase):
 
     def test_sanitize_filename_removes_windows_reserved_characters(self):
         self.assertEqual(
-            sanitize_filename('CCTV: clear/video? "test"'),
-            "CCTV_ clear_video_ _test_",
+            sanitize_filename('央视: 清明/高清视频? "test"'),
+            "央视_ 清明_高清视频_ _test_",
         )
 
     def test_builds_yt_dlp_options_for_mp4_merge(self):
@@ -136,7 +136,7 @@ class DownloaderDiscoveryTests(unittest.TestCase):
     def test_platform_video_download_returns_completed_mp4_path(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir)
-            final_path = output_dir / "clip.mp4"
+            final_path = output_dir / "my_clip.mp4"
 
             class FakeYDL:
                 instances = []
@@ -159,7 +159,7 @@ class DownloaderDiscoveryTests(unittest.TestCase):
                         hook(
                             {
                                 "status": "finished",
-                                "filepath": str(final_path),
+                                "postprocessor": "MoveFilesAfterDownload",
                                 "info_dict": {"filepath": str(final_path)},
                             }
                         )
@@ -179,6 +179,7 @@ class DownloaderDiscoveryTests(unittest.TestCase):
         self.assertEqual(fake.calls, [("https://example.com/watch/abc", True)])
         self.assertEqual(fake.options["ffmpeg_location"], "C:/ffmpeg.exe")
         self.assertEqual(fake.options["merge_output_format"], "mp4")
+        self.assertEqual(fake.options["outtmpl"], str(output_dir / "my_clip.%(ext)s"))
         self.assertIn("postprocessor_hooks", fake.options)
 
     def test_platform_video_download_uses_new_base_when_sibling_media_exists(self):
@@ -212,10 +213,73 @@ class DownloaderDiscoveryTests(unittest.TestCase):
                     base_name="clip",
                     ydl_factory=FakeYDL,
                 )
+
                 self.assertEqual(result, output_dir / "clip_2.mp4")
                 self.assertEqual(stale_path.read_bytes(), b"old-video")
                 self.assertEqual(len(FakeYDL.instances), 1)
                 self.assertTrue(FakeYDL.instances[0].options["outtmpl"].endswith("clip_2.%(ext)s"))
+
+    def test_platform_video_download_rejects_external_existing_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_root = Path(tmpdir)
+            output_dir = temp_root / "downloads"
+            output_dir.mkdir()
+            external_path = temp_root / "unrelated.mp4"
+            external_path.write_bytes(b"external-video")
+
+            class ExternalPathYDL:
+                def __init__(self, options):
+                    self.options = options
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def extract_info(self, page_url, download=True):
+                    return {"filepath": str(external_path)}
+
+            with patch("downloader.find_ffmpeg", return_value="C:/ffmpeg.exe"):
+                with self.assertRaises(DownloadError) as cm:
+                    downloader.download_platform_video(
+                        page_url="https://example.com/watch/abc",
+                        output_dir=output_dir,
+                        base_name="my_clip",
+                        ydl_factory=ExternalPathYDL,
+                    )
+
+        self.assertIn("生成的视频文件", str(cm.exception))
+
+    def test_platform_video_download_rejects_same_directory_mismatched_base_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            mismatched_path = output_dir / "otherclip.mp4"
+            mismatched_path.write_bytes(b"wrong-video")
+
+            class MismatchedBaseYDL:
+                def __init__(self, options):
+                    self.options = options
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def extract_info(self, page_url, download=True):
+                    return {"filepath": str(mismatched_path)}
+
+            with patch("downloader.find_ffmpeg", return_value="C:/ffmpeg.exe"):
+                with self.assertRaises(DownloadError) as cm:
+                    downloader.download_platform_video(
+                        page_url="https://example.com/watch/abc",
+                        output_dir=output_dir,
+                        base_name="my_clip",
+                        ydl_factory=MismatchedBaseYDL,
+                    )
+
+        self.assertIn("生成的视频文件", str(cm.exception))
 
     def test_platform_video_download_wraps_ydl_errors(self):
         class BrokenYDL:
@@ -300,6 +364,40 @@ class DownloaderDiscoveryTests(unittest.TestCase):
                     )
 
         self.assertIn("生成的视频文件", str(cm.exception))
+
+    def test_platform_video_download_wraps_selection_filesystem_errors(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            final_path = output_dir / "my_clip.mp4"
+            final_path.write_bytes(b"video-bytes")
+
+            class FakeYDL:
+                def __init__(self, options):
+                    self.options = options
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def extract_info(self, page_url, download=True):
+                    return {"filepath": str(final_path)}
+
+            with patch("downloader.find_ffmpeg", return_value="C:/ffmpeg.exe"):
+                with patch(
+                    "downloader.iter_existing_base_paths",
+                    side_effect=[[], OSError("access denied")],
+                ):
+                    with self.assertRaises(DownloadError) as cm:
+                        downloader.download_platform_video(
+                            page_url="https://example.com/watch/abc",
+                            output_dir=output_dir,
+                            base_name="my_clip",
+                            ydl_factory=FakeYDL,
+                        )
+
+        self.assertIn("access denied", str(cm.exception))
 
     def test_platform_video_rejects_fourth_positional_argument(self):
         with self.assertRaises(TypeError):

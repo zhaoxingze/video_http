@@ -403,10 +403,13 @@ def iter_existing_base_paths(output_dir: Path, base_name: str) -> Iterable[Path]
 
 
 def unique_output_base(output_dir: Path, base_name: str) -> str:
-    for index in range(1, 10_000):
-        candidate = base_name if index == 1 else f"{base_name}_{index}"
-        if not any(iter_existing_base_paths(output_dir, candidate)):
-            return candidate
+    try:
+        for index in range(1, 10_000):
+            candidate = base_name if index == 1 else f"{base_name}_{index}"
+            if not any(iter_existing_base_paths(output_dir, candidate)):
+                return candidate
+    except OSError as exc:
+        raise DownloadError(f"平台输出目录检查失败：{exc}") from exc
     raise DownloadError(f"无法生成不重复的平台输出文件名：{output_dir / base_name}")
 
 
@@ -417,6 +420,30 @@ def is_completed_media_file(path: Path) -> bool:
     if any(suffix in {".part", ".ytdl"} for suffix in lower_suffixes):
         return False
     return lower_suffixes[-1] in FINAL_VIDEO_EXTENSIONS
+
+
+def path_compare_key(path: Path) -> str:
+    return os.path.normcase(str(path))
+
+
+def is_reserved_media_filename(filename: str, unique_name: str) -> bool:
+    lower_name = filename.casefold()
+    lower_base = unique_name.casefold()
+    return any(lower_name == f"{lower_base}{suffix}" for suffix in FINAL_VIDEO_EXTENSIONS)
+
+
+def normalize_trusted_media_path(
+    candidate: Path,
+    output_dir: Path,
+    resolved_output_dir: Path,
+    unique_name: str,
+) -> Path | None:
+    resolved_candidate = candidate.resolve()
+    if path_compare_key(resolved_candidate.parent) != path_compare_key(resolved_output_dir):
+        return None
+    if not is_reserved_media_filename(resolved_candidate.name, unique_name):
+        return None
+    return output_dir / resolved_candidate.name
 
 
 def download_platform_video(
@@ -474,26 +501,39 @@ def download_platform_video(
                     remember_candidate(item.get("filepath"))
         candidate_paths = list(finished_paths)
 
-    candidate_paths.extend(iter_existing_base_paths(output_dir, unique_name))
+    try:
+        resolved_output_dir = output_dir.resolve()
+        candidate_paths.extend(iter_existing_base_paths(output_dir, unique_name))
 
-    seen: set[Path] = set()
-    completed: list[Path] = []
-    for candidate in candidate_paths:
-        resolved = Path(candidate)
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        if not resolved.is_file():
-            continue
-        if not is_completed_media_file(resolved):
-            continue
-        completed.append(resolved)
+        seen: set[str] = set()
+        completed: list[Path] = []
+        for candidate in candidate_paths:
+            trusted = normalize_trusted_media_path(
+                Path(candidate),
+                output_dir,
+                resolved_output_dir,
+                unique_name,
+            )
+            if trusted is None:
+                continue
+            key = path_compare_key(trusted)
+            if key in seen:
+                continue
+            seen.add(key)
+            if not trusted.is_file():
+                continue
+            if not is_completed_media_file(trusted):
+                continue
+            completed.append(trusted)
 
-    mp4_candidates = [path for path in completed if path.suffix.lower() == ".mp4"]
-    if mp4_candidates:
-        return max(mp4_candidates, key=lambda path: path.stat().st_mtime_ns)
-    if completed:
-        return max(completed, key=lambda path: path.stat().st_mtime_ns)
+        mp4_candidates = [path for path in completed if path.suffix.lower() == ".mp4"]
+        if mp4_candidates:
+            return max(mp4_candidates, key=lambda path: path.stat().st_mtime_ns)
+        if completed:
+            return max(completed, key=lambda path: path.stat().st_mtime_ns)
+    except OSError as exc:
+        raise DownloadError(f"平台下载结果检查失败：{exc}") from exc
+
     raise DownloadError("平台下载结束，但没有找到生成的视频文件。")
 
 
