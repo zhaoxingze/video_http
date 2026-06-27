@@ -2,9 +2,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import downloader
 from downloader import (
     build_cctv_variant_candidates,
     build_yt_dlp_options,
+    DownloadError,
     download_resolved_video,
     discover_candidates,
     extract_cctv_video_center_id,
@@ -133,6 +135,15 @@ def test_platform_video_dispatches_to_platform_adapter():
 
     mocked.assert_called_once_with("https://example.com/watch/abc", Path("C:/Downloads"), "my_clip")
     assert result == Path("C:/Downloads/my_clip.mp4")
+
+
+def test_platform_video_keyword_invocation_reaches_stub_error():
+    with unittest.TestCase().assertRaisesRegex(DownloadError, "平台视频下载适配器尚未实现"):
+        downloader.download_platform_video(
+            page_url="https://example.com/watch/abc",
+            output_dir=Path("C:/Downloads"),
+            base_name="my_clip",
+        )
 
 
 if __name__ == "__main__":

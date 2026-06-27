@@ -389,7 +389,7 @@ def build_yt_dlp_options(output_dir: Path, base_name: str, ffmpeg: str) -> dict[
 
 
 def download_platform_video(
-    url: str,
+    page_url: str,
     output_dir: Path,
     base_name: str,
     *,
