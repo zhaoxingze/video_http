@@ -27,6 +27,10 @@ USER_AGENT = (
 VIDEO_EXTENSIONS = (".mp4", ".m4v", ".mov", ".webm", ".flv", ".ts")
 FINAL_VIDEO_EXTENSIONS = VIDEO_EXTENSIONS + (".mkv",)
 HLS_EXTENSION = ".m3u8"
+BILIBILI_HTTP_HEADERS = {
+    "Origin": "https://www.bilibili.com",
+    "Referer": "https://www.bilibili.com/",
+}
 MEDIA_RE = re.compile(
     r"(?P<url>(?:(?:https?:)?//|/)[^'\"\s<>\\]+?"
     r"\.(?:mp4|m4v|mov|webm|flv|m3u8)(?:\?[^'\"\s<>\\]*)?)",
@@ -389,6 +393,17 @@ def build_yt_dlp_options(output_dir: Path, base_name: str, ffmpeg: str) -> dict[
     }
 
 
+def platform_http_headers(page_url: str) -> dict[str, str]:
+    hostname = urlparse(page_url).hostname
+    if not hostname:
+        return {}
+
+    normalized = hostname.rstrip(".").lower()
+    if normalized == "bilibili.com" or normalized.endswith(".bilibili.com"):
+        return dict(BILIBILI_HTTP_HEADERS)
+    return {}
+
+
 def iter_existing_base_paths(output_dir: Path, base_name: str) -> Iterable[Path]:
     if not output_dir.exists():
         return []
@@ -468,6 +483,9 @@ def download_platform_video(
 
     unique_name = unique_output_base(output_dir, base_name)
     options = build_yt_dlp_options(output_dir, unique_name, ffmpeg)
+    http_headers = platform_http_headers(page_url)
+    if http_headers:
+        options["http_headers"] = http_headers
     finished_paths: list[Path] = []
 
     def remember_candidate(value: object) -> None:

@@ -192,6 +192,99 @@ class DownloaderDiscoveryTests(unittest.TestCase):
         self.assertEqual(fake.options["outtmpl"], str(output_dir / "my_clip.%(ext)s"))
         self.assertIn("postprocessor_hooks", fake.options)
 
+    def test_bilibili_platform_video_adds_origin_and_referer_headers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            final_path = output_dir / "bilibili_clip.mp4"
+
+            class FakeYDL:
+                instances = []
+
+                def __init__(self, options):
+                    self.options = options
+                    self.calls = []
+                    FakeYDL.instances.append(self)
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def extract_info(self, page_url, download=True):
+                    self.calls.append((page_url, download))
+                    final_path.write_bytes(b"video-bytes")
+                    for hook in self.options["postprocessor_hooks"]:
+                        hook(
+                            {
+                                "status": "finished",
+                                "info_dict": {"filepath": str(final_path)},
+                            }
+                        )
+                    return {"filepath": str(final_path)}
+
+            with patch("downloader.find_ffmpeg", return_value="C:/ffmpeg.exe"):
+                result = downloader.download_platform_video(
+                    page_url="https://www.bilibili.com/video/BV1jL5F6PEog/",
+                    output_dir=output_dir,
+                    base_name="bilibili_clip",
+                    ydl_factory=FakeYDL,
+                )
+
+        self.assertEqual(result, final_path)
+        self.assertEqual(len(FakeYDL.instances), 1)
+        fake = FakeYDL.instances[0]
+        self.assertEqual(fake.calls, [("https://www.bilibili.com/video/BV1jL5F6PEog/", True)])
+        self.assertEqual(
+            fake.options.get("http_headers"),
+            {
+                "Origin": "https://www.bilibili.com",
+                "Referer": "https://www.bilibili.com/",
+            },
+        )
+
+    def test_unrelated_platform_video_does_not_add_bilibili_headers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            final_path = output_dir / "other_clip.mp4"
+
+            class FakeYDL:
+                instances = []
+
+                def __init__(self, options):
+                    self.options = options
+                    FakeYDL.instances.append(self)
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def extract_info(self, page_url, download=True):
+                    final_path.write_bytes(b"video-bytes")
+                    for hook in self.options["postprocessor_hooks"]:
+                        hook(
+                            {
+                                "status": "finished",
+                                "info_dict": {"filepath": str(final_path)},
+                            }
+                        )
+                    return {"filepath": str(final_path)}
+
+            with patch("downloader.find_ffmpeg", return_value="C:/ffmpeg.exe"):
+                result = downloader.download_platform_video(
+                    page_url="https://www.bilibili.com.example.org/video/BV1jL5F6PEog/",
+                    output_dir=output_dir,
+                    base_name="other_clip",
+                    ydl_factory=FakeYDL,
+                )
+
+        self.assertEqual(result, final_path)
+        self.assertEqual(len(FakeYDL.instances), 1)
+        fake = FakeYDL.instances[0]
+        self.assertNotIn("http_headers", fake.options)
+
     def test_platform_video_download_uses_new_base_when_sibling_media_exists(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir)
