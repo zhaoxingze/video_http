@@ -13,6 +13,7 @@ from downloader import (
     download_resolved_video,
     extract_cctv_video_center_id,
     parse_hls_master,
+    platform_http_headers,
     resolve_url,
     sanitize_filename,
 )
@@ -242,6 +243,30 @@ class DownloaderDiscoveryTests(unittest.TestCase):
                 "Referer": "https://www.bilibili.com/",
             },
         )
+
+    def test_platform_http_headers_matches_only_bilibili_hosts(self):
+        expected = {
+            "Origin": "https://www.bilibili.com",
+            "Referer": "https://www.bilibili.com/",
+        }
+
+        accepted_urls = [
+            "https://bilibili.com/video/BV1jL5F6PEog/",
+            "https://api.bilibili.com/x/player/wbi/playurl",
+            "https://www.bilibili.com/video/BV1jL5F6PEog/",
+        ]
+        rejected_urls = [
+            "https://bilibili.com.evil.example/video/BV1jL5F6PEog/",
+            "https://notbilibili.com/video/BV1jL5F6PEog/",
+        ]
+
+        for url in accepted_urls:
+            with self.subTest(url=url, expected_headers=True):
+                self.assertEqual(platform_http_headers(url), expected)
+
+        for url in rejected_urls:
+            with self.subTest(url=url, expected_headers=False):
+                self.assertEqual(platform_http_headers(url), {})
 
     def test_unrelated_platform_video_does_not_add_bilibili_headers(self):
         with tempfile.TemporaryDirectory() as tmpdir:
