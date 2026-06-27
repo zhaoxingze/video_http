@@ -4,13 +4,13 @@ from unittest.mock import patch
 
 import downloader
 from downloader import (
+    DownloadError,
+    ResolvedVideo,
     build_cctv_variant_candidates,
     build_yt_dlp_options,
-    DownloadError,
-    download_resolved_video,
     discover_candidates,
+    download_resolved_video,
     extract_cctv_video_center_id,
-    ResolvedVideo,
     parse_hls_master,
     resolve_url,
     sanitize_filename,
@@ -22,7 +22,7 @@ class DownloaderDiscoveryTests(unittest.TestCase):
         html = """
         <html><body>
           <video src="/watch/preview.mp4"></video>
-          <a class="download" href="/files/high.mp4">下载高清视频</a>
+          <a class="download" href="/files/high.mp4">涓嬭浇楂樻竻瑙嗛</a>
         </body></html>
         """
 
@@ -48,14 +48,14 @@ class DownloaderDiscoveryTests(unittest.TestCase):
         self.assertEqual(candidates[0].source, "media-tag")
 
     def test_extracts_cctv_video_center_id(self):
-        html = '''
+        html = """
         <script>
         var playerParas = {
           videoCenterId: "063b7096c2004a109dfc12c012bda2c9",
           videoId: "VIDE100215108600"
         };
         </script>
-        '''
+        """
 
         self.assertEqual(
             extract_cctv_video_center_id(html),
@@ -97,10 +97,53 @@ class DownloaderDiscoveryTests(unittest.TestCase):
 
     def test_sanitize_filename_removes_windows_reserved_characters(self):
         self.assertEqual(
-            sanitize_filename('央视: 清明/高清视频? "test"'),
-            "央视_ 清明_高清视频_ _test_",
+            sanitize_filename('澶: 娓呮槑/楂樻竻瑙嗛? "test"'),
+            "澶_ 娓呮槑_楂樻竻瑙嗛_ _test_",
         )
 
+    def test_builds_yt_dlp_options_for_mp4_merge(self):
+        options = build_yt_dlp_options(Path("C:/Downloads"), "my_clip", "C:/ffmpeg.exe")
+
+        self.assertEqual(options["format"], "bv*+ba/b")
+        self.assertEqual(options["merge_output_format"], "mp4")
+        self.assertEqual(options["ffmpeg_location"], "C:/ffmpeg.exe")
+        self.assertEqual(options["outtmpl"], str(Path("C:/Downloads") / "my_clip.%(ext)s"))
+        self.assertTrue(options["noplaylist"])
+        self.assertTrue(options["quiet"])
+        self.assertTrue(options["no_warnings"])
+        self.assertTrue(options["windowsfilenames"])
+
+    def test_platform_video_dispatches_to_platform_adapter(self):
+        video = ResolvedVideo(
+            url="https://example.com/watch/abc",
+            kind="platform-video",
+            title="Platform clip",
+            source="yt-dlp",
+        )
+
+        with patch("downloader.download_platform_video", return_value=Path("C:/Downloads/my_clip.mp4")) as mocked:
+            result = download_resolved_video(video, Path("C:/Downloads"), "my_clip")
+
+        mocked.assert_called_once_with("https://example.com/watch/abc", Path("C:/Downloads"), "my_clip")
+        self.assertEqual(result, Path("C:/Downloads/my_clip.mp4"))
+
+    def test_platform_video_keyword_invocation_reaches_stub_error(self):
+        with self.assertRaisesRegex(DownloadError, "平台视频下载适配器尚未实现。"):
+            downloader.download_platform_video(
+                page_url="https://example.com/watch/abc",
+                output_dir=Path("C:/Downloads"),
+                base_name="my_clip",
+                ydl_factory=lambda options: object(),
+            )
+
+    def test_platform_video_rejects_fourth_positional_argument(self):
+        with self.assertRaises(TypeError):
+            downloader.download_platform_video(
+                "https://example.com/watch/abc",
+                Path("C:/Downloads"),
+                "my_clip",
+                lambda options: object(),
+            )
 
     def test_falls_back_to_platform_downloader_when_html_has_no_direct_media(self):
         html = b"<html><head><title>Platform clip</title></head><body></body></html>"
@@ -110,40 +153,6 @@ class DownloaderDiscoveryTests(unittest.TestCase):
         self.assertEqual(video.kind, "platform-video")
         self.assertEqual(video.source, "yt-dlp")
         self.assertEqual(video.url, "https://www.bilibili.com/video/BV1jL5F6PEog/")
-
-
-def test_builds_yt_dlp_options_for_mp4_merge():
-    options = build_yt_dlp_options(Path("C:/Downloads"), "my_clip", "C:/ffmpeg.exe")
-
-    assert options["format"] == "bv*+ba/b"
-    assert options["merge_output_format"] == "mp4"
-    assert options["ffmpeg_location"] == "C:/ffmpeg.exe"
-    assert options["noplaylist"] is True
-    assert "my_clip" in str(options["outtmpl"])
-
-
-def test_platform_video_dispatches_to_platform_adapter():
-    video = ResolvedVideo(
-        url="https://example.com/watch/abc",
-        kind="platform-video",
-        title="Platform clip",
-        source="yt-dlp",
-    )
-
-    with patch("downloader.download_platform_video", return_value=Path("C:/Downloads/my_clip.mp4")) as mocked:
-        result = download_resolved_video(video, Path("C:/Downloads"), "my_clip")
-
-    mocked.assert_called_once_with("https://example.com/watch/abc", Path("C:/Downloads"), "my_clip")
-    assert result == Path("C:/Downloads/my_clip.mp4")
-
-
-def test_platform_video_keyword_invocation_reaches_stub_error():
-    with unittest.TestCase().assertRaisesRegex(DownloadError, "平台视频下载适配器尚未实现"):
-        downloader.download_platform_video(
-            page_url="https://example.com/watch/abc",
-            output_dir=Path("C:/Downloads"),
-            base_name="my_clip",
-        )
 
 
 if __name__ == "__main__":
