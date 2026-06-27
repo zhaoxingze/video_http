@@ -9,6 +9,7 @@ python -m PyInstaller `
   --name VideoDownloaderApp `
   --icon ".\assets\app.ico" `
   --add-data ".\assets;assets" `
+  --collect-all yt_dlp `
   --collect-binaries imageio_ffmpeg `
   --hidden-import imageio_ffmpeg `
   app_gui.py

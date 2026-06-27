@@ -19,6 +19,11 @@ from downloader import (
 
 
 class DownloaderDiscoveryTests(unittest.TestCase):
+    def test_build_script_collects_all_yt_dlp_assets(self):
+        build_script = Path(__file__).with_name("build_app.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("--collect-all yt_dlp", build_script)
+
     def test_prefers_explicit_download_anchor(self):
         html = """
         <html><body>
