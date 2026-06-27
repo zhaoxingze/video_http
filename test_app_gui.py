@@ -1,5 +1,7 @@
 import unittest
+from tempfile import TemporaryDirectory
 from pathlib import Path
+from unittest.mock import patch
 
 from app_gui import (
     default_font_spec,
@@ -7,6 +9,7 @@ from app_gui import (
     format_finished_message,
     is_probable_url,
     make_output_name,
+    main,
     platform_badges,
     primary_button_options,
     ui_palette,
@@ -15,6 +18,18 @@ from app_gui import (
 
 
 class AppGuiHelperTests(unittest.TestCase):
+    def test_main_platform_smoke_test_file_runs_without_tk_and_writes_diagnostics(self):
+        with TemporaryDirectory() as tmpdir:
+            marker = Path(tmpdir) / "platform-smoke.txt"
+            with patch("app_gui.tk.Tk", side_effect=AssertionError("Tk should not be created")):
+                exit_code = main(["--platform-smoke-test-file", str(marker)])
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(marker.exists())
+            diagnostics = marker.read_text(encoding="utf-8")
+            self.assertIn("yt-dlp", diagnostics)
+            self.assertIn("ffmpeg", diagnostics)
+
     def test_is_probable_url_accepts_http_urls(self):
         self.assertTrue(is_probable_url("https://news.cctv.com/example.shtml"))
         self.assertTrue(is_probable_url("http://example.com/video.mp4"))

@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from downloader import DownloadError, download_resolved_video, resolve_url, sanitize_filename
+from downloader import DownloadError, download_resolved_video, find_ffmpeg, resolve_url, sanitize_filename
 
 
 APP_TITLE = "网页视频下载器"
@@ -595,6 +595,32 @@ def smoke_test() -> int:
     return 0
 
 
+def platform_runtime_smoke_diagnostics() -> str:
+    try:
+        import yt_dlp  # type: ignore
+        from yt_dlp import YoutubeDL  # type: ignore
+    except Exception as exc:
+        raise RuntimeError(f"Platform runtime missing yt-dlp: {exc}") from exc
+
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        raise RuntimeError("Platform runtime missing ffmpeg executable path.")
+
+    ffmpeg_path = Path(ffmpeg)
+    if not ffmpeg_path.exists() or not ffmpeg_path.is_file():
+        raise RuntimeError(f"Platform runtime ffmpeg path not found: {ffmpeg}")
+
+    version_text = getattr(yt_dlp, "__version__", None)
+    if not version_text:
+        version_module = getattr(yt_dlp, "version", None)
+        version_text = getattr(version_module, "__version__", None)
+    if not version_text:
+        version_text = "unknown"
+
+    _ = YoutubeDL
+    return f"yt-dlp={version_text}\nffmpeg={ffmpeg_path.resolve()}"
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = argv if argv is not None else sys.argv[1:]
     if "--smoke-test" in argv:
@@ -608,6 +634,14 @@ def main(argv: list[str] | None = None) -> int:
             result = smoke_test()
             Path(arg.split("=", 1)[1]).write_text("ok", encoding="utf-8")
             return result
+        if arg == "--platform-smoke-test-file" and index + 1 < len(argv):
+            diagnostics = platform_runtime_smoke_diagnostics()
+            Path(argv[index + 1]).write_text(diagnostics, encoding="utf-8")
+            return 0
+        if arg.startswith("--platform-smoke-test-file="):
+            diagnostics = platform_runtime_smoke_diagnostics()
+            Path(arg.split("=", 1)[1]).write_text(diagnostics, encoding="utf-8")
+            return 0
 
     root = tk.Tk()
     VideoDownloaderApp(root)
