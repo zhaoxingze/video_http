@@ -14,6 +14,10 @@ python -m PyInstaller `
   --hidden-import imageio_ffmpeg `
   app_gui.py
 
+if ($LASTEXITCODE -ne 0) {
+  throw "PyInstaller failed with exit code $LASTEXITCODE."
+}
+
 Write-Host ""
 Write-Host "Built app:"
 Write-Host (Resolve-Path ".\dist\VideoDownloaderApp.exe")

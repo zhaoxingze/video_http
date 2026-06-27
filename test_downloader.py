@@ -23,8 +23,15 @@ class DownloaderDiscoveryTests(unittest.TestCase):
     def test_build_script_collects_all_yt_dlp_assets(self):
         build_script = Path(__file__).with_name("build_app.ps1").read_text(encoding="utf-8")
         spec_text = Path(__file__).with_name("VideoDownloaderApp.spec").read_text(encoding="utf-8")
+        build_lines = [line.strip() for line in build_script.splitlines() if line.strip()]
 
         self.assertIn("--collect-all yt_dlp", build_script)
+        command_end = build_lines.index("app_gui.py")
+        self.assertIn("if ($LASTEXITCODE -ne 0) {", build_lines)
+        guard_index = build_lines.index("if ($LASTEXITCODE -ne 0) {")
+        success_index = build_lines.index('Write-Host "Built app:"')
+        self.assertEqual(guard_index, command_end + 1)
+        self.assertLess(guard_index, success_index)
         self.assertIn("tmp_ret = collect_all('yt_dlp')", spec_text)
         self.assertIn("datas += tmp_ret[0]", spec_text)
         self.assertIn("binaries += tmp_ret[1]", spec_text)
