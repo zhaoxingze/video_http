@@ -1,10 +1,12 @@
 import unittest
+from unittest.mock import patch
 
 from downloader import (
     build_cctv_variant_candidates,
     discover_candidates,
     extract_cctv_video_center_id,
     parse_hls_master,
+    resolve_url,
     sanitize_filename,
 )
 
@@ -92,6 +94,16 @@ class DownloaderDiscoveryTests(unittest.TestCase):
             sanitize_filename('央视: 清明/高清视频? "test"'),
             "央视_ 清明_高清视频_ _test_",
         )
+
+
+    def test_falls_back_to_platform_downloader_when_html_has_no_direct_media(self):
+        html = b"<html><head><title>Platform clip</title></head><body></body></html>"
+        with patch("downloader.http_get", return_value=html):
+            video = resolve_url("https://www.bilibili.com/video/BV1jL5F6PEog/")
+
+        self.assertEqual(video.kind, "platform-video")
+        self.assertEqual(video.source, "yt-dlp")
+        self.assertEqual(video.url, "https://www.bilibili.com/video/BV1jL5F6PEog/")
 
 
 if __name__ == "__main__":

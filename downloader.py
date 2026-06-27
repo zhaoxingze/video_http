@@ -322,7 +322,7 @@ def resolve_page_video(page_url: str) -> tuple[ResolvedVideo, str]:
     title = extract_title(html) or filename_from_url(page_url) or "downloaded_video"
     candidates = discover_candidates(html, page_url)
     if not candidates:
-        raise DownloadError("没有在页面里找到下载链接、视频标签或可识别的播放器参数。")
+        return ResolvedVideo(page_url, "platform-video", title, "yt-dlp"), html
 
     errors: list[str] = []
     for candidate in candidates:
