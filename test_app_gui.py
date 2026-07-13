@@ -11,6 +11,8 @@ from app_gui import (
     extract_preview_info,
     field_specs,
     format_finished_message,
+    format_progress_message,
+    progress_percent,
     is_probable_url,
     make_output_name,
     main,
@@ -25,6 +27,16 @@ class AppGuiHelperTests(unittest.TestCase):
     def test_preview_debounce_is_short_enough_for_paste_feedback(self):
         self.assertGreaterEqual(PREVIEW_DEBOUNCE_MS, 300)
         self.assertLessEqual(PREVIEW_DEBOUNCE_MS, 900)
+
+    def test_progress_percent_clamps_to_valid_range(self):
+        self.assertEqual(progress_percent(0, 100), 0)
+        self.assertEqual(progress_percent(75, 100), 75)
+        self.assertEqual(progress_percent(150, 100), 100)
+        self.assertIsNone(progress_percent(10, 0))
+
+    def test_format_progress_message_uses_percentage_when_total_known(self):
+        self.assertEqual(format_progress_message(75, 100), "下载进度：75%")
+        self.assertEqual(format_progress_message(5, 0), "下载中：已下载 5 B")
 
     def test_extract_preview_info_reads_title_thumbnail_with_ytdlp(self):
         captured_options = {}

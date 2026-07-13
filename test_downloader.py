@@ -14,6 +14,7 @@ from downloader import (
     download_resolved_video,
     download_direct,
     extract_cctv_video_center_id,
+    http_get,
     parse_hls_master,
     platform_http_headers,
     resolve_url,
@@ -150,7 +151,12 @@ class DownloaderDiscoveryTests(unittest.TestCase):
             ) as mocked:
                 result = download_resolved_video(video, output_dir, "my_clip")
 
-        mocked.assert_called_once_with("https://example.com/watch/abc", output_dir, "my_clip")
+        mocked.assert_called_once_with(
+            "https://example.com/watch/abc",
+            output_dir,
+            "my_clip",
+            progress_callback=None,
+        )
         self.assertEqual(result, output_dir / "my_clip.mp4")
 
     def test_platform_video_download_returns_completed_mp4_path(self):
@@ -307,6 +313,7 @@ class DownloaderDiscoveryTests(unittest.TestCase):
 
     def test_bilivideo_direct_download_sends_bilibili_referer(self):
         captured_headers = {}
+        test_case = self
 
         class FakeResponse(BytesIO):
             headers = {"Content-Length": "11"}
@@ -317,13 +324,14 @@ class DownloaderDiscoveryTests(unittest.TestCase):
             def __exit__(self, *_args):
                 return False
 
-        def fake_urlopen(request, timeout=60):
-            captured_headers.update(dict(request.header_items()))
-            self.assertEqual(timeout, 60)
-            return FakeResponse(b"video-bytes")
+        class FakeOpener:
+            def open(self, request, timeout=60):
+                captured_headers.update(dict(request.header_items()))
+                test_case.assertEqual(timeout, 60)
+                return FakeResponse(b"video-bytes")
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch("downloader.urlopen", side_effect=fake_urlopen):
+            with patch("downloader.build_opener", return_value=FakeOpener()):
                 result = download_direct(
                     "https://upos.example.bilivideo.com/path/video.mp4?token=1",
                     Path(tmpdir),
@@ -339,6 +347,46 @@ class DownloaderDiscoveryTests(unittest.TestCase):
         headers = downloader.direct_download_headers("https://upos.example.bilivideo.com/path/video.mp4")
 
         self.assertIn("Chrome/126.0.0.0", headers["User-Agent"])
+
+    def test_http_get_bypasses_proxy_for_bilibili_hosts(self):
+        opened = {}
+
+        class FakeResponse(BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class FakeOpener:
+            def open(self, request, timeout=30):
+                opened["url"] = request.full_url
+                opened["timeout"] = timeout
+                return FakeResponse(b'{"code":0}')
+
+        with patch("downloader.build_opener", return_value=FakeOpener()) as build_opener:
+            with patch("downloader.urlopen", side_effect=AssertionError("proxy urlopen should not run")):
+                raw = http_get("https://api.bilibili.com/x/web-interface/view?bvid=BV1TcMJ6XE8M")
+
+        self.assertEqual(raw, b'{"code":0}')
+        self.assertEqual(opened["url"], "https://api.bilibili.com/x/web-interface/view?bvid=BV1TcMJ6XE8M")
+        self.assertEqual(opened["timeout"], 30)
+        self.assertEqual(build_opener.call_count, 1)
+
+    def test_http_get_uses_default_proxy_policy_for_other_hosts(self):
+        class FakeResponse(BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        with patch("downloader.urlopen", return_value=FakeResponse(b"ok")) as default_urlopen:
+            with patch("downloader.build_opener", side_effect=AssertionError("should not bypass proxy")):
+                raw = http_get("https://example.com/video")
+
+        self.assertEqual(raw, b"ok")
+        self.assertEqual(default_urlopen.call_count, 1)
 
     def test_direct_download_rejects_incomplete_response(self):
         class FakeResponse(BytesIO):
@@ -361,6 +409,29 @@ class DownloaderDiscoveryTests(unittest.TestCase):
             self.assertFalse((Path(tmpdir) / "clip.mp4").exists())
 
         self.assertIn("下载不完整", str(cm.exception))
+
+    def test_direct_download_reports_progress_callback(self):
+        class FakeResponse(BytesIO):
+            headers = {"Content-Length": "11"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        progress = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("downloader.urlopen", return_value=FakeResponse(b"video-bytes")):
+                result = download_direct(
+                    "https://cdn.example.test/video.mp4",
+                    Path(tmpdir),
+                    "clip",
+                    progress_callback=lambda done, total: progress.append((done, total)),
+                )
+
+        self.assertEqual(result.name, "clip.mp4")
+        self.assertEqual(progress, [(11, 11)])
 
     def test_unrelated_platform_video_does_not_add_bilibili_headers(self):
         with tempfile.TemporaryDirectory() as tmpdir:

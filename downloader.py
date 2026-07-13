@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlencode, urljoin, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
 
 USER_AGENT = (
@@ -31,6 +31,7 @@ BILIBILI_HTTP_HEADERS = {
     "Origin": "https://www.bilibili.com",
     "Referer": "https://www.bilibili.com/",
 }
+BILIBILI_DIRECT_DOMAINS = ("bilibili.com", "bilivideo.com", "hdslb.com", "biliimg.com")
 BILIBILI_BVID_RE = re.compile(r"\b(BV[0-9A-Za-z]{10})\b")
 MEDIA_RE = re.compile(
     r"(?P<url>(?:(?:https?:)?//|/)[^'\"\s<>\\]+?"
@@ -38,6 +39,7 @@ MEDIA_RE = re.compile(
     re.IGNORECASE,
 )
 WINDOWS_RESERVED_CHARS = '<>:"/\\|?*'
+ProgressCallback = Callable[[int, int], None]
 
 
 @dataclass(frozen=True)
@@ -138,19 +140,37 @@ class MediaHTMLParser(HTMLParser):
             self._title_parts = []
 
 
+def hostname_matches_domain(hostname: str | None, domain: str) -> bool:
+    if not hostname:
+        return False
+    normalized = hostname.rstrip(".").lower()
+    return normalized == domain or normalized.endswith(f".{domain}")
+
+
+def should_bypass_proxy(url: str) -> bool:
+    hostname = urlparse(url).hostname
+    return any(hostname_matches_domain(hostname, domain) for domain in BILIBILI_DIRECT_DOMAINS)
+
+
+def open_url(request: Request, *, timeout: int = 30):
+    if should_bypass_proxy(request.full_url):
+        return build_opener(ProxyHandler({})).open(request, timeout=timeout)
+    return urlopen(request, timeout=timeout)
+
+
 def http_get(url: str, *, timeout: int = 30, headers: dict[str, str] | None = None) -> bytes:
     request_headers = {"User-Agent": USER_AGENT}
     if headers:
         request_headers.update(headers)
     req = Request(url, headers=request_headers)
-    with urlopen(req, timeout=timeout) as response:
+    with open_url(req, timeout=timeout) as response:
         return response.read()
 
 
 def http_head_content_length(url: str, *, timeout: int = 12) -> int:
     req = Request(url, method="HEAD", headers={"User-Agent": USER_AGENT})
     try:
-        with urlopen(req, timeout=timeout) as response:
+        with open_url(req, timeout=timeout) as response:
             value = response.headers.get("Content-Length", "0")
             return int(value or 0)
     except (HTTPError, URLError, TimeoutError, ValueError):
@@ -383,15 +403,21 @@ def resolve_url(url: str) -> ResolvedVideo:
     return video
 
 
-def download_resolved_video(video: ResolvedVideo, output_dir: Path, output_name: str | None = None) -> Path:
+def download_resolved_video(
+    video: ResolvedVideo,
+    output_dir: Path,
+    output_name: str | None = None,
+    *,
+    progress_callback: ProgressCallback | None = None,
+) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     base_name = sanitize_filename(output_name or video.title or filename_from_url(video.url) or "downloaded_video")
 
     if video.kind == "platform-video":
-        return download_platform_video(video.url, output_dir, base_name)
+        return download_platform_video(video.url, output_dir, base_name, progress_callback=progress_callback)
     if video.kind == "hls":
-        return download_hls(video.url, output_dir, base_name)
-    return download_direct(video.url, output_dir, base_name)
+        return download_hls(video.url, output_dir, base_name, progress_callback=progress_callback)
+    return download_direct(video.url, output_dir, base_name, progress_callback=progress_callback)
 
 
 def build_yt_dlp_options(output_dir: Path, base_name: str, ffmpeg: str) -> dict[str, object]:
@@ -408,32 +434,20 @@ def build_yt_dlp_options(output_dir: Path, base_name: str, ffmpeg: str) -> dict[
 
 
 def platform_http_headers(page_url: str) -> dict[str, str]:
-    hostname = urlparse(page_url).hostname
-    if not hostname:
-        return {}
-
-    normalized = hostname.rstrip(".").lower()
-    if normalized == "bilibili.com" or normalized.endswith(".bilibili.com"):
+    if hostname_matches_domain(urlparse(page_url).hostname, "bilibili.com"):
         return dict(BILIBILI_HTTP_HEADERS)
     return {}
 
 
 def direct_download_headers(media_url: str) -> dict[str, str]:
     headers = {"User-Agent": USER_AGENT}
-    hostname = urlparse(media_url).hostname or ""
-    normalized = hostname.rstrip(".").lower()
-    if normalized == "bilivideo.com" or normalized.endswith(".bilivideo.com"):
+    if hostname_matches_domain(urlparse(media_url).hostname, "bilivideo.com"):
         headers.update(BILIBILI_HTTP_HEADERS)
     return headers
 
 
 def bilibili_bvid_from_url(page_url: str) -> str | None:
-    hostname = urlparse(page_url).hostname
-    if not hostname:
-        return None
-
-    normalized = hostname.rstrip(".").lower()
-    if normalized != "bilibili.com" and not normalized.endswith(".bilibili.com"):
+    if not hostname_matches_domain(urlparse(page_url).hostname, "bilibili.com"):
         return None
 
     match = BILIBILI_BVID_RE.search(unquote(page_url))
@@ -626,6 +640,7 @@ def download_platform_video(
     base_name: str,
     *,
     ydl_factory: Callable[[dict[str, object]], object] | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -660,6 +675,15 @@ def download_platform_video(
             remember_candidate(info.get("filepath"))
 
     options["postprocessor_hooks"] = [remember_finished]
+    if progress_callback is not None:
+        def remember_progress(item: dict[str, object]) -> None:
+            if item.get("status") != "downloading":
+                return
+            downloaded = int(item.get("downloaded_bytes") or 0)
+            total = int(item.get("total_bytes") or item.get("total_bytes_estimate") or 0)
+            progress_callback(downloaded, total)
+
+        options["progress_hooks"] = [remember_progress]
 
     try:
         with ydl_factory(options) as ydl:
@@ -714,11 +738,17 @@ def download_platform_video(
     raise DownloadError("平台下载结束，但没有找到生成的视频文件。")
 
 
-def download_direct(url: str, output_dir: Path, base_name: str) -> Path:
+def download_direct(
+    url: str,
+    output_dir: Path,
+    base_name: str,
+    *,
+    progress_callback: ProgressCallback | None = None,
+) -> Path:
     suffix = Path(urlparse(url).path).suffix or ".mp4"
     output_path = unique_path(output_dir / f"{base_name}{suffix}")
     req = Request(url, headers=direct_download_headers(url))
-    with urlopen(req, timeout=60) as response, output_path.open("wb") as target:
+    with open_url(req, timeout=60) as response, output_path.open("wb") as target:
         total = int(response.headers.get("Content-Length", "0") or 0)
         downloaded = 0
         while True:
@@ -728,6 +758,8 @@ def download_direct(url: str, output_dir: Path, base_name: str) -> Path:
             target.write(chunk)
             downloaded += len(chunk)
             print_progress(downloaded, total)
+            if progress_callback is not None:
+                progress_callback(downloaded, total)
     print()
     if total > 0 and downloaded < total:
         try:
@@ -738,7 +770,13 @@ def download_direct(url: str, output_dir: Path, base_name: str) -> Path:
     return output_path
 
 
-def download_hls(playlist_url: str, output_dir: Path, base_name: str) -> Path:
+def download_hls(
+    playlist_url: str,
+    output_dir: Path,
+    base_name: str,
+    *,
+    progress_callback: ProgressCallback | None = None,
+) -> Path:
     selected = select_best_hls_variant(playlist_url)
     output_path = unique_path(output_dir / f"{base_name}.mp4")
     ffmpeg = find_ffmpeg()
@@ -766,6 +804,8 @@ def download_hls(playlist_url: str, output_dir: Path, base_name: str) -> Path:
     ]
     print(f"使用 HLS 源：{selected}")
     subprocess.run(command, check=True)
+    if progress_callback is not None:
+        progress_callback(1, 1)
     return output_path
 
 

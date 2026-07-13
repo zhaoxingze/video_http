@@ -11,7 +11,6 @@ from io import BytesIO
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -26,6 +25,7 @@ from downloader import (
     fetch_bilibili_video_info,
     filename_from_url,
     find_ffmpeg,
+    http_get,
     platform_http_headers,
     resolve_url,
     sanitize_filename,
@@ -171,6 +171,20 @@ def format_size(size: int) -> str:
     return f"{size} B"
 
 
+def progress_percent(done: int, total: int) -> int | None:
+    if total <= 0:
+        return None
+    percent = int(done / total * 100)
+    return max(0, min(100, percent))
+
+
+def format_progress_message(done: int, total: int) -> str:
+    percent = progress_percent(done, total)
+    if percent is None:
+        return f"下载中：已下载 {format_size(max(0, done))}"
+    return f"下载进度：{percent}%"
+
+
 def format_finished_message(path: Path) -> str:
     size = path.stat().st_size if path.exists() else 0
     return f"下载完成：{path.name}\n大小：{format_size(size)}\n位置：{path.resolve()}"
@@ -212,9 +226,7 @@ def extract_preview_info(page_url: str, *, ydl_factory=None) -> PreviewInfo:
 def fetch_preview_thumbnail(thumbnail_url: str, *, timeout: int = 15) -> bytes | None:
     if not thumbnail_url:
         return None
-    req = Request(thumbnail_url, headers={"User-Agent": USER_AGENT})
-    with urlopen(req, timeout=timeout) as response:
-        return response.read()
+    return http_get(thumbnail_url, timeout=timeout, headers={"User-Agent": USER_AGENT})
 
 
 class VideoDownloaderApp:
@@ -231,6 +243,7 @@ class VideoDownloaderApp:
         self.url_var = tk.StringVar()
         self.output_dir_var = tk.StringVar(value=str(default_download_dir().resolve()))
         self.name_var = tk.StringVar()
+        self.progress_text_var = tk.StringVar(value="0%")
         self.queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self.worker: threading.Thread | None = None
         self.last_output_path: Path | None = None
@@ -362,15 +375,25 @@ class VideoDownloaderApp:
         status_box.columnconfigure(0, weight=1)
         status_box.rowconfigure(2, weight=1)
 
+        status_header = tk.Frame(status_box, bg=palette["surface"])
+        status_header.grid(row=0, column=0, sticky=tk.EW, pady=(0, 8))
+        status_header.columnconfigure(0, weight=1)
         tk.Label(
-            status_box,
+            status_header,
             text="下载状态",
             bg=palette["surface"],
             fg=palette["text"],
             font=("Microsoft YaHei UI", 10, "bold"),
-        ).grid(row=0, column=0, sticky=tk.W, pady=(0, 8))
+        ).grid(row=0, column=0, sticky=tk.W)
+        tk.Label(
+            status_header,
+            textvariable=self.progress_text_var,
+            bg=palette["surface"],
+            fg=palette["primary"],
+            font=("Microsoft YaHei UI", 10, "bold"),
+        ).grid(row=0, column=1, sticky=tk.E)
 
-        self.progress = ttk.Progressbar(status_box, mode="indeterminate", style="Horizontal.TProgressbar")
+        self.progress = ttk.Progressbar(status_box, mode="determinate", maximum=100, style="Horizontal.TProgressbar")
         self.progress.grid(row=1, column=0, sticky=tk.EW, pady=(0, 10))
 
         status_shell = tk.Frame(status_box, bg=palette["surface_muted"], bd=0, highlightthickness=1, highlightbackground=palette["line"])
@@ -644,7 +667,10 @@ class VideoDownloaderApp:
 
         self.last_output_path = None
         self._set_download_button_busy(True)
-        self.progress.start(12)
+        self.progress.stop()
+        self.progress.configure(mode="determinate", maximum=100)
+        self.progress["value"] = 0
+        self.progress_text_var.set("0%")
         self._clear_log()
         self._log("正在解析网页和视频源...")
         self.worker = threading.Thread(
@@ -658,7 +684,15 @@ class VideoDownloaderApp:
         try:
             video = resolve_url(url)
             self.queue.put(("status", f"已找到视频源：{video.source}\n类型：{video.kind}\n正在下载..."))
-            output_path = download_resolved_video(video, output_dir, output_name)
+            def progress_callback(done: int, total: int) -> None:
+                self.queue.put(("progress", (done, total)))
+
+            output_path = download_resolved_video(
+                video,
+                output_dir,
+                output_name,
+                progress_callback=progress_callback,
+            )
             self.queue.put(("success", output_path))
         except Exception as exc:
             self.queue.put(("error", exc))
@@ -669,6 +703,9 @@ class VideoDownloaderApp:
                 kind, payload = self.queue.get_nowait()
                 if kind == "status":
                     self._log(str(payload))
+                elif kind == "progress":
+                    done, total = payload
+                    self._update_progress(int(done), int(total))
                 elif kind == "success":
                     self._finish_success(Path(payload))
                 elif kind == "error":
@@ -687,6 +724,9 @@ class VideoDownloaderApp:
 
     def _finish_success(self, path: Path) -> None:
         self.progress.stop()
+        self.progress.configure(mode="determinate", maximum=100)
+        self.progress["value"] = 100
+        self.progress_text_var.set("100%")
         self._set_download_button_busy(False)
         self.last_output_path = path
         message = format_finished_message(path)
@@ -695,6 +735,7 @@ class VideoDownloaderApp:
 
     def _finish_error(self, error: object) -> None:
         self.progress.stop()
+        self.progress_text_var.set("失败")
         self._set_download_button_busy(False)
         if isinstance(error, DownloadError):
             message = str(error)
@@ -702,6 +743,21 @@ class VideoDownloaderApp:
             message = f"{type(error).__name__}: {error}"
         self._log(f"下载失败：{message}")
         messagebox.showerror(APP_TITLE, f"下载失败：\n{message}")
+
+    def _update_progress(self, done: int, total: int) -> None:
+        percent = progress_percent(done, total)
+        if percent is None:
+            if str(self.progress.cget("mode")) != "indeterminate":
+                self.progress.configure(mode="indeterminate")
+                self.progress.start(12)
+            self.progress_text_var.set(format_progress_message(done, total))
+            return
+
+        if str(self.progress.cget("mode")) != "determinate":
+            self.progress.stop()
+            self.progress.configure(mode="determinate", maximum=100)
+        self.progress["value"] = percent
+        self.progress_text_var.set(f"{percent}%")
 
     def _set_download_button_busy(self, busy: bool) -> None:
         if busy:
