@@ -2,12 +2,14 @@ import unittest
 from tempfile import TemporaryDirectory
 from pathlib import Path
 from unittest.mock import patch
+import json
 
 import downloader
 from app_gui import (
     PREVIEW_DEBOUNCE_MS,
     PreviewInfo,
     default_font_spec,
+    load_default_output_dir,
     extract_preview_info,
     field_specs,
     format_finished_message,
@@ -18,12 +20,32 @@ from app_gui import (
     main,
     platform_badges,
     primary_button_options,
+    remember_output_dir,
     ui_palette,
     window_config,
 )
 
 
 class AppGuiHelperTests(unittest.TestCase):
+    def test_load_default_output_dir_uses_saved_directory(self):
+        with TemporaryDirectory() as tmpdir:
+            saved_dir = Path(tmpdir) / "custom-downloads"
+            settings_path = Path(tmpdir) / "settings.json"
+            settings_path.write_text(json.dumps({"output_dir": str(saved_dir)}), encoding="utf-8")
+
+            self.assertEqual(load_default_output_dir(settings_path=settings_path), saved_dir)
+
+    def test_remember_output_dir_overwrites_saved_default(self):
+        with TemporaryDirectory() as tmpdir:
+            settings_path = Path(tmpdir) / "settings.json"
+            first = Path(tmpdir) / "first"
+            second = Path(tmpdir) / "second"
+
+            remember_output_dir(first, settings_path=settings_path)
+            remember_output_dir(second, settings_path=settings_path)
+
+            self.assertEqual(load_default_output_dir(settings_path=settings_path), second)
+
     def test_preview_debounce_is_short_enough_for_paste_feedback(self):
         self.assertGreaterEqual(PREVIEW_DEBOUNCE_MS, 300)
         self.assertLessEqual(PREVIEW_DEBOUNCE_MS, 900)

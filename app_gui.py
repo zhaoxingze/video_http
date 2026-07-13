@@ -7,6 +7,7 @@ import os
 import queue
 import sys
 import threading
+import json
 from io import BytesIO
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +38,7 @@ VIDEO_SUFFIXES = {".mp4", ".m4v", ".mov", ".webm", ".flv", ".ts"}
 PREVIEW_DEBOUNCE_MS = 650
 PREVIEW_CANVAS_SIZE = (168, 118)
 PREVIEW_IMAGE_SIZE = (160, 82)
+SETTINGS_FILENAME = "settings.json"
 
 
 def app_base_dir() -> Path:
@@ -55,6 +57,46 @@ def default_download_dir() -> Path:
     if downloads.exists():
         return downloads
     return Path.cwd() / "downloads"
+
+
+def settings_path() -> Path:
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        base_dir = Path(local_app_data) / "VideoDownloaderApp"
+    else:
+        base_dir = Path.home() / ".video_downloader"
+    return base_dir / SETTINGS_FILENAME
+
+
+def read_settings(*, path: Path | None = None) -> dict[str, object]:
+    target = path or settings_path()
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def write_settings(settings: dict[str, object], *, path: Path | None = None) -> None:
+    target = path or settings_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_default_output_dir(*, settings_path: Path | None = None) -> Path:
+    saved = read_settings(path=settings_path).get("output_dir")
+    if isinstance(saved, str) and saved.strip():
+        return Path(saved).expanduser()
+    return default_download_dir()
+
+
+def remember_output_dir(output_dir: Path | str, *, settings_path: Path | None = None) -> None:
+    value = str(output_dir).strip()
+    if not value:
+        return
+    settings = read_settings(path=settings_path)
+    settings["output_dir"] = str(Path(value).expanduser())
+    write_settings(settings, path=settings_path)
 
 
 def default_font_spec() -> tuple[str, int]:
@@ -241,7 +283,7 @@ class VideoDownloaderApp:
         self.root.option_add("*Font", default_font_spec())
 
         self.url_var = tk.StringVar()
-        self.output_dir_var = tk.StringVar(value=str(default_download_dir().resolve()))
+        self.output_dir_var = tk.StringVar(value=str(load_default_output_dir().resolve()))
         self.name_var = tk.StringVar()
         self.progress_text_var = tk.StringVar(value="0%")
         self.queue: queue.Queue[tuple[str, object]] = queue.Queue()
@@ -251,6 +293,7 @@ class VideoDownloaderApp:
         self.preview_canvas: tk.Canvas | None = None
         self.preview_image: ImageTk.PhotoImage | None = None
         self.preview_after_id: str | None = None
+        self.output_dir_after_id: str | None = None
         self.preview_request_id = 0
         self.entry_placeholders: dict[tk.Entry, tuple[tk.StringVar, str]] = {}
 
@@ -258,6 +301,7 @@ class VideoDownloaderApp:
         self._configure_styles()
         self._build_ui()
         self.url_var.trace_add("write", self._on_url_changed)
+        self.output_dir_var.trace_add("write", self._on_output_dir_changed)
         self._log("准备就绪。")
         self.root.after(150, self._poll_queue)
 
@@ -626,6 +670,22 @@ class VideoDownloaderApp:
             self.preview_after_id = None
         self.preview_after_id = self.root.after(PREVIEW_DEBOUNCE_MS, self._refresh_preview_from_url)
 
+    def _on_output_dir_changed(self, *_args) -> None:
+        if self.output_dir_after_id is not None:
+            self.root.after_cancel(self.output_dir_after_id)
+            self.output_dir_after_id = None
+        self.output_dir_after_id = self.root.after(600, self._remember_current_output_dir)
+
+    def _remember_current_output_dir(self) -> None:
+        self.output_dir_after_id = None
+        specs = field_specs()
+        output_dir_value = self._value_without_placeholder(self.output_dir_var, specs["output_dir"].placeholder)
+        if output_dir_value:
+            try:
+                remember_output_dir(output_dir_value)
+            except OSError:
+                pass
+
     def _refresh_preview_from_url(self) -> None:
         self.preview_after_id = None
         specs = field_specs()
@@ -652,6 +712,10 @@ class VideoDownloaderApp:
         selected = filedialog.askdirectory(initialdir=self.output_dir_var.get() or str(default_download_dir()))
         if selected:
             self.output_dir_var.set(selected)
+            try:
+                remember_output_dir(selected)
+            except OSError:
+                pass
 
     def _start_download(self) -> None:
         specs = field_specs()
@@ -664,6 +728,10 @@ class VideoDownloaderApp:
         output_name_value = self._value_without_placeholder(self.name_var, specs["name"].placeholder)
         output_dir = Path(output_dir_value or default_download_dir())
         output_name = make_output_name(output_name_value)
+        try:
+            remember_output_dir(output_dir)
+        except OSError:
+            pass
 
         self.last_output_path = None
         self._set_download_button_busy(True)
