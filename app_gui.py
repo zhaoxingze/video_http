@@ -7,18 +7,36 @@ import os
 import queue
 import sys
 import threading
+from io import BytesIO
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from downloader import DownloadError, download_resolved_video, find_ffmpeg, resolve_url, sanitize_filename
+from PIL import Image, ImageTk
+
+from downloader import (
+    USER_AGENT,
+    DownloadError,
+    bilibili_bvid_from_url,
+    download_resolved_video,
+    fetch_bilibili_video_info,
+    filename_from_url,
+    find_ffmpeg,
+    platform_http_headers,
+    resolve_url,
+    sanitize_filename,
+)
 
 
 APP_TITLE = "网页视频下载器"
 VIDEO_SUFFIXES = {".mp4", ".m4v", ".mov", ".webm", ".flv", ".ts"}
+PREVIEW_DEBOUNCE_MS = 650
+PREVIEW_CANVAS_SIZE = (168, 118)
+PREVIEW_IMAGE_SIZE = (160, 82)
 
 
 def app_base_dir() -> Path:
@@ -82,6 +100,13 @@ class FieldSpec:
     label: str
     placeholder: str
     inline_help: str = ""
+
+
+@dataclass(frozen=True)
+class PreviewInfo:
+    title: str
+    source: str
+    thumbnail_url: str = ""
 
 
 def field_specs() -> dict[str, FieldSpec]:
@@ -151,6 +176,47 @@ def format_finished_message(path: Path) -> str:
     return f"下载完成：{path.name}\n大小：{format_size(size)}\n位置：{path.resolve()}"
 
 
+def extract_preview_info(page_url: str, *, ydl_factory=None) -> PreviewInfo:
+    if bilibili_bvid_from_url(page_url):
+        info = fetch_bilibili_video_info(page_url)
+        return PreviewInfo(title=info.title, source="BiliBili", thumbnail_url=info.thumbnail_url)
+
+    if ydl_factory is None:
+        try:
+            from yt_dlp import YoutubeDL  # type: ignore
+        except Exception as exc:
+            raise RuntimeError(f"无法加载预览解析组件：{exc}") from exc
+        ydl_factory = YoutubeDL
+
+    options: dict[str, object] = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "noplaylist": True,
+    }
+    headers = platform_http_headers(page_url)
+    if headers:
+        options["headers"] = headers
+
+    with ydl_factory(options) as ydl:
+        info = ydl.extract_info(page_url, download=False)
+
+    if not isinstance(info, dict):
+        info = {}
+    title = str(info.get("title") or filename_from_url(page_url) or "网页视频")
+    source = str(info.get("extractor") or info.get("extractor_key") or "网页视频")
+    thumbnail_url = str(info.get("thumbnail") or "")
+    return PreviewInfo(title=title, source=source, thumbnail_url=thumbnail_url)
+
+
+def fetch_preview_thumbnail(thumbnail_url: str, *, timeout: int = 15) -> bytes | None:
+    if not thumbnail_url:
+        return None
+    req = Request(thumbnail_url, headers={"User-Agent": USER_AGENT})
+    with urlopen(req, timeout=timeout) as response:
+        return response.read()
+
+
 class VideoDownloaderApp:
     def __init__(self, root: tk.Tk):
         palette = ui_palette()
@@ -169,11 +235,16 @@ class VideoDownloaderApp:
         self.worker: threading.Thread | None = None
         self.last_output_path: Path | None = None
         self.logo_image: tk.PhotoImage | None = None
+        self.preview_canvas: tk.Canvas | None = None
+        self.preview_image: ImageTk.PhotoImage | None = None
+        self.preview_after_id: str | None = None
+        self.preview_request_id = 0
         self.entry_placeholders: dict[tk.Entry, tuple[tk.StringVar, str]] = {}
 
         self._set_window_icon()
         self._configure_styles()
         self._build_ui()
+        self.url_var.trace_add("write", self._on_url_changed)
         self._log("准备就绪。")
         self.root.after(150, self._poll_queue)
 
@@ -345,15 +416,66 @@ class VideoDownloaderApp:
 
     def _build_preview(self, parent: tk.Widget) -> tk.Canvas:
         palette = ui_palette()
-        canvas = tk.Canvas(parent, width=168, height=118, bg=palette["surface"], highlightthickness=0)
+        width, height = PREVIEW_CANVAS_SIZE
+        canvas = tk.Canvas(parent, width=width, height=height, bg=palette["surface"], highlightthickness=0)
+        self.preview_canvas = canvas
+        self._draw_preview_placeholder("视频预览")
+        return canvas
+
+    def _draw_preview_placeholder(self, status: str, detail: str = "") -> None:
+        if self.preview_canvas is None:
+            return
+        palette = ui_palette()
+        canvas = self.preview_canvas
+        self.preview_image = None
+        canvas.delete("all")
         canvas.create_rectangle(4, 4, 164, 112, fill=palette["preview"], outline="#0f172a")
         canvas.create_rectangle(4, 4, 164, 30, fill="#263241", outline="#263241")
-        canvas.create_text(84, 18, text="视频预览", fill="#d7e5f2", font=("Microsoft YaHei UI", 9, "bold"))
+        canvas.create_text(84, 18, text=status, fill="#d7e5f2", font=("Microsoft YaHei UI", 9, "bold"))
         canvas.create_oval(61, 39, 107, 85, fill="#ffffff", outline="#ffffff")
         canvas.create_polygon(79, 51, 79, 73, 98, 62, fill=palette["primary"], outline=palette["primary"])
-        canvas.create_rectangle(18, 94, 70, 100, fill="#334155", outline="#334155")
-        canvas.create_rectangle(18, 102, 118, 106, fill="#1e293b", outline="#1e293b")
-        return canvas
+        if detail:
+            canvas.create_rectangle(16, 92, 152, 108, fill="#111827", outline="#111827")
+            canvas.create_text(84, 100, text=self._preview_text(detail, 18), fill="#d7e5f2", font=("Microsoft YaHei UI", 8))
+        else:
+            canvas.create_rectangle(18, 94, 70, 100, fill="#334155", outline="#334155")
+            canvas.create_rectangle(18, 102, 118, 106, fill="#1e293b", outline="#1e293b")
+
+    def _draw_preview_info(self, info: PreviewInfo, thumbnail: bytes | None) -> None:
+        if self.preview_canvas is None:
+            return
+        palette = ui_palette()
+        canvas = self.preview_canvas
+        canvas.delete("all")
+        canvas.create_rectangle(4, 4, 164, 112, fill=palette["preview"], outline="#0f172a")
+        canvas.create_rectangle(4, 4, 164, 30, fill="#263241", outline="#263241")
+        canvas.create_text(84, 18, text=self._preview_text(info.source or "视频预览", 14), fill="#d7e5f2", font=("Microsoft YaHei UI", 9, "bold"))
+
+        if thumbnail:
+            try:
+                image = Image.open(BytesIO(thumbnail)).convert("RGB")
+                image.thumbnail(PREVIEW_IMAGE_SIZE, Image.Resampling.LANCZOS)
+                photo = ImageTk.PhotoImage(image)
+                self.preview_image = photo
+                canvas.create_image(84, 71, image=photo, anchor=tk.CENTER)
+            except Exception:
+                self.preview_image = None
+                canvas.create_oval(61, 39, 107, 85, fill="#ffffff", outline="#ffffff")
+                canvas.create_polygon(79, 51, 79, 73, 98, 62, fill=palette["primary"], outline=palette["primary"])
+        else:
+            self.preview_image = None
+            canvas.create_oval(61, 39, 107, 85, fill="#ffffff", outline="#ffffff")
+            canvas.create_polygon(79, 51, 79, 73, 98, 62, fill=palette["primary"], outline=palette["primary"])
+
+        canvas.create_rectangle(8, 90, 160, 112, fill="#111827", outline="#111827")
+        canvas.create_text(84, 101, text=self._preview_text(info.title, 19), fill="#eef6ff", font=("Microsoft YaHei UI", 8, "bold"))
+
+    @staticmethod
+    def _preview_text(value: str, max_chars: int) -> str:
+        text = " ".join(value.split())
+        if len(text) <= max_chars:
+            return text
+        return text[: max_chars - 1] + "…"
 
     def _show_settings_placeholder(self) -> None:
         messagebox.showinfo(APP_TITLE, "当前版本无需额外设置。")
@@ -475,6 +597,34 @@ class VideoDownloaderApp:
             return ""
         return value
 
+    def _on_url_changed(self, *_args) -> None:
+        if self.preview_after_id is not None:
+            self.root.after_cancel(self.preview_after_id)
+            self.preview_after_id = None
+        self.preview_after_id = self.root.after(PREVIEW_DEBOUNCE_MS, self._refresh_preview_from_url)
+
+    def _refresh_preview_from_url(self) -> None:
+        self.preview_after_id = None
+        specs = field_specs()
+        url = self._value_without_placeholder(self.url_var, specs["url"].placeholder)
+        if not is_probable_url(url):
+            self.preview_request_id += 1
+            self._draw_preview_placeholder("视频预览")
+            return
+
+        self.preview_request_id += 1
+        request_id = self.preview_request_id
+        self._draw_preview_placeholder("正在读取预览", "请稍候")
+        threading.Thread(target=self._preview_worker, args=(request_id, url), daemon=True).start()
+
+    def _preview_worker(self, request_id: int, url: str) -> None:
+        try:
+            info = extract_preview_info(url)
+            thumbnail = fetch_preview_thumbnail(info.thumbnail_url) if info.thumbnail_url else None
+            self.queue.put(("preview_success", (request_id, info, thumbnail)))
+        except Exception as exc:
+            self.queue.put(("preview_error", (request_id, exc)))
+
     def _choose_output_dir(self) -> None:
         selected = filedialog.askdirectory(initialdir=self.output_dir_var.get() or str(default_download_dir()))
         if selected:
@@ -523,6 +673,14 @@ class VideoDownloaderApp:
                     self._finish_success(Path(payload))
                 elif kind == "error":
                     self._finish_error(payload)
+                elif kind == "preview_success":
+                    request_id, info, thumbnail = payload
+                    if request_id == self.preview_request_id and isinstance(info, PreviewInfo):
+                        self._draw_preview_info(info, thumbnail if isinstance(thumbnail, bytes) else None)
+                elif kind == "preview_error":
+                    request_id, _error = payload
+                    if request_id == self.preview_request_id:
+                        self._draw_preview_placeholder("视频预览", "无法读取")
         except queue.Empty:
             pass
         self.root.after(150, self._poll_queue)

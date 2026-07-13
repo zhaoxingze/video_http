@@ -15,13 +15,13 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Callable, Iterable
 from urllib.error import HTTPError, URLError
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import unquote, urlencode, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
 
 VIDEO_EXTENSIONS = (".mp4", ".m4v", ".mov", ".webm", ".flv", ".ts")
@@ -31,6 +31,7 @@ BILIBILI_HTTP_HEADERS = {
     "Origin": "https://www.bilibili.com",
     "Referer": "https://www.bilibili.com/",
 }
+BILIBILI_BVID_RE = re.compile(r"\b(BV[0-9A-Za-z]{10})\b")
 MEDIA_RE = re.compile(
     r"(?P<url>(?:(?:https?:)?//|/)[^'\"\s<>\\]+?"
     r"\.(?:mp4|m4v|mov|webm|flv|m3u8)(?:\?[^'\"\s<>\\]*)?)",
@@ -60,6 +61,14 @@ class ResolvedVideo:
     kind: str
     title: str = ""
     source: str = ""
+
+
+@dataclass(frozen=True)
+class BilibiliVideoInfo:
+    bvid: str
+    cid: int
+    title: str
+    thumbnail_url: str = ""
 
 
 class DownloadError(RuntimeError):
@@ -129,8 +138,11 @@ class MediaHTMLParser(HTMLParser):
             self._title_parts = []
 
 
-def http_get(url: str, *, timeout: int = 30) -> bytes:
-    req = Request(url, headers={"User-Agent": USER_AGENT})
+def http_get(url: str, *, timeout: int = 30, headers: dict[str, str] | None = None) -> bytes:
+    request_headers = {"User-Agent": USER_AGENT}
+    if headers:
+        request_headers.update(headers)
+    req = Request(url, headers=request_headers)
     with urlopen(req, timeout=timeout) as response:
         return response.read()
 
@@ -365,6 +377,8 @@ def resolve_url(url: str) -> ResolvedVideo:
         return ResolvedVideo(url, "hls", filename_from_url(url), "input-url")
     if is_video_url(url):
         return ResolvedVideo(url, "direct-video", filename_from_url(url), "input-url")
+    if bilibili_bvid_from_url(url):
+        return resolve_bilibili_video(url)
     video, _html = resolve_page_video(url)
     return video
 
@@ -402,6 +416,151 @@ def platform_http_headers(page_url: str) -> dict[str, str]:
     if normalized == "bilibili.com" or normalized.endswith(".bilibili.com"):
         return dict(BILIBILI_HTTP_HEADERS)
     return {}
+
+
+def direct_download_headers(media_url: str) -> dict[str, str]:
+    headers = {"User-Agent": USER_AGENT}
+    hostname = urlparse(media_url).hostname or ""
+    normalized = hostname.rstrip(".").lower()
+    if normalized == "bilivideo.com" or normalized.endswith(".bilivideo.com"):
+        headers.update(BILIBILI_HTTP_HEADERS)
+    return headers
+
+
+def bilibili_bvid_from_url(page_url: str) -> str | None:
+    hostname = urlparse(page_url).hostname
+    if not hostname:
+        return None
+
+    normalized = hostname.rstrip(".").lower()
+    if normalized != "bilibili.com" and not normalized.endswith(".bilibili.com"):
+        return None
+
+    match = BILIBILI_BVID_RE.search(unquote(page_url))
+    return match.group(1) if match else None
+
+
+def bilibili_api_headers(page_url: str) -> dict[str, str]:
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json, text/plain, */*",
+        **BILIBILI_HTTP_HEADERS,
+    }
+    if page_url:
+        headers["Referer"] = page_url
+    return headers
+
+
+def normalize_bilibili_asset_url(value: object) -> str:
+    url = str(value or "").strip()
+    if url.startswith("//"):
+        return f"https:{url}"
+    if url.startswith("http://"):
+        return f"https://{url[7:]}"
+    return url
+
+
+def decode_json_response(raw: bytes, context: str) -> dict[str, object]:
+    try:
+        payload = json.loads(decode_html(raw))
+    except json.JSONDecodeError as exc:
+        raise DownloadError(f"{context} 返回内容不是有效 JSON：{exc}") from exc
+    if not isinstance(payload, dict):
+        raise DownloadError(f"{context} 返回内容格式不正确。")
+    return payload
+
+
+def fetch_bilibili_video_info(page_url: str) -> BilibiliVideoInfo:
+    bvid = bilibili_bvid_from_url(page_url)
+    if not bvid:
+        raise DownloadError("无法识别 B 站视频 BV 号。")
+
+    api_url = "https://api.bilibili.com/x/web-interface/view?" + urlencode({"bvid": bvid})
+    try:
+        payload = decode_json_response(
+            http_get(api_url, headers=bilibili_api_headers(page_url)),
+            "B 站视频信息接口",
+        )
+    except (HTTPError, URLError, TimeoutError) as exc:
+        raise DownloadError(f"B 站视频信息接口读取失败：{exc}") from exc
+
+    if payload.get("code") != 0:
+        raise DownloadError(f"B 站视频信息接口返回失败：{payload.get('message') or payload.get('code')}")
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise DownloadError("B 站视频信息接口没有返回视频数据。")
+
+    cid_value = data.get("cid")
+    if cid_value is None:
+        pages = data.get("pages")
+        if isinstance(pages, list) and pages and isinstance(pages[0], dict):
+            cid_value = pages[0].get("cid")
+    try:
+        cid = int(str(cid_value))
+    except (TypeError, ValueError) as exc:
+        raise DownloadError("B 站视频信息接口没有返回可用 cid。") from exc
+
+    title = str(data.get("title") or bvid)
+    thumbnail_url = normalize_bilibili_asset_url(data.get("pic"))
+    return BilibiliVideoInfo(bvid=bvid, cid=cid, title=title, thumbnail_url=thumbnail_url)
+
+
+def first_bilibili_play_url(entries: object) -> str:
+    if not isinstance(entries, list):
+        return ""
+
+    ordered_entries = sorted(
+        [entry for entry in entries if isinstance(entry, dict)],
+        key=lambda entry: int(entry.get("size") or 0),
+        reverse=True,
+    )
+    for entry in ordered_entries:
+        url = normalize_bilibili_asset_url(entry.get("url"))
+        if url:
+            return url
+        backup_urls = entry.get("backup_url")
+        if isinstance(backup_urls, list):
+            for backup_url in backup_urls:
+                normalized = normalize_bilibili_asset_url(backup_url)
+                if normalized:
+                    return normalized
+        else:
+            normalized = normalize_bilibili_asset_url(backup_urls)
+            if normalized:
+                return normalized
+    return ""
+
+
+def resolve_bilibili_video(page_url: str) -> ResolvedVideo:
+    info = fetch_bilibili_video_info(page_url)
+    query = {
+        "bvid": info.bvid,
+        "cid": str(info.cid),
+        "qn": "80",
+        "fnval": "16",
+        "fnver": "0",
+        "fourk": "1",
+        "platform": "html5",
+    }
+    api_url = "https://api.bilibili.com/x/player/wbi/playurl?" + urlencode(query)
+    try:
+        payload = decode_json_response(
+            http_get(api_url, headers=bilibili_api_headers(page_url)),
+            "B 站播放地址接口",
+        )
+    except (HTTPError, URLError, TimeoutError) as exc:
+        raise DownloadError(f"B 站播放地址接口读取失败：{exc}") from exc
+
+    if payload.get("code") != 0:
+        raise DownloadError(f"B 站播放地址接口返回失败：{payload.get('message') or payload.get('code')}")
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise DownloadError("B 站播放地址接口没有返回视频数据。")
+
+    video_url = first_bilibili_play_url(data.get("durl"))
+    if not video_url:
+        raise DownloadError("B 站播放地址接口没有返回可下载的 MP4 地址。")
+    return ResolvedVideo(video_url, "direct-video", info.title, "bilibili-api")
 
 
 def iter_existing_base_paths(output_dir: Path, base_name: str) -> Iterable[Path]:
@@ -485,7 +644,7 @@ def download_platform_video(
     options = build_yt_dlp_options(output_dir, unique_name, ffmpeg)
     http_headers = platform_http_headers(page_url)
     if http_headers:
-        options["http_headers"] = http_headers
+        options["headers"] = http_headers
     finished_paths: list[Path] = []
 
     def remember_candidate(value: object) -> None:
@@ -558,7 +717,7 @@ def download_platform_video(
 def download_direct(url: str, output_dir: Path, base_name: str) -> Path:
     suffix = Path(urlparse(url).path).suffix or ".mp4"
     output_path = unique_path(output_dir / f"{base_name}{suffix}")
-    req = Request(url, headers={"User-Agent": USER_AGENT})
+    req = Request(url, headers=direct_download_headers(url))
     with urlopen(req, timeout=60) as response, output_path.open("wb") as target:
         total = int(response.headers.get("Content-Length", "0") or 0)
         downloaded = 0
@@ -570,6 +729,12 @@ def download_direct(url: str, output_dir: Path, base_name: str) -> Path:
             downloaded += len(chunk)
             print_progress(downloaded, total)
     print()
+    if total > 0 and downloaded < total:
+        try:
+            output_path.unlink()
+        except OSError:
+            pass
+        raise DownloadError(f"视频下载不完整：已下载 {downloaded} 字节，应为 {total} 字节。")
     return output_path
 
 

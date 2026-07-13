@@ -3,8 +3,12 @@ from tempfile import TemporaryDirectory
 from pathlib import Path
 from unittest.mock import patch
 
+import downloader
 from app_gui import (
+    PREVIEW_DEBOUNCE_MS,
+    PreviewInfo,
     default_font_spec,
+    extract_preview_info,
     field_specs,
     format_finished_message,
     is_probable_url,
@@ -18,6 +22,120 @@ from app_gui import (
 
 
 class AppGuiHelperTests(unittest.TestCase):
+    def test_preview_debounce_is_short_enough_for_paste_feedback(self):
+        self.assertGreaterEqual(PREVIEW_DEBOUNCE_MS, 300)
+        self.assertLessEqual(PREVIEW_DEBOUNCE_MS, 900)
+
+    def test_extract_preview_info_reads_title_thumbnail_with_ytdlp(self):
+        captured_options = {}
+        calls = []
+
+        class FakeYDL:
+            def __init__(self, options):
+                captured_options.update(options)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def extract_info(self, url, download=False):
+                calls.append((url, download))
+                return {
+                    "title": "示例视频",
+                    "thumbnail": "https://i.example.test/cover.jpg",
+                    "extractor": "BiliBili",
+                }
+
+        info = extract_preview_info(
+            "https://example.com/watch/abc",
+            ydl_factory=FakeYDL,
+        )
+
+        self.assertEqual(
+            info,
+            PreviewInfo(
+                title="示例视频",
+                source="BiliBili",
+                thumbnail_url="https://i.example.test/cover.jpg",
+            ),
+        )
+        self.assertEqual(calls, [("https://example.com/watch/abc", False)])
+        self.assertNotIn("headers", captured_options)
+        self.assertNotIn("http_headers", captured_options)
+        self.assertTrue(captured_options["skip_download"])
+
+    def test_extract_preview_info_uses_bilibili_api_before_ytdlp(self):
+        def fake_fetch(page_url):
+            self.assertEqual(page_url, "https://www.bilibili.com/video/BV1jL5F6PEog/")
+            return downloader.BilibiliVideoInfo(
+                bvid="BV1jL5F6PEog",
+                cid=38779030352,
+                title="Bili title",
+                thumbnail_url="https://i.example.test/cover.jpg",
+            )
+
+        class FailingYDL:
+            def __init__(self, _options):
+                raise AssertionError("yt-dlp should not run for Bilibili preview")
+
+        with patch("app_gui.fetch_bilibili_video_info", side_effect=fake_fetch):
+            info = extract_preview_info(
+                "https://www.bilibili.com/video/BV1jL5F6PEog/",
+                ydl_factory=FailingYDL,
+            )
+
+        self.assertEqual(
+            info,
+            PreviewInfo(
+                title="Bili title",
+                source="BiliBili",
+                thumbnail_url="https://i.example.test/cover.jpg",
+            ),
+        )
+
+    def test_extract_preview_info_does_not_add_bilibili_headers_to_other_hosts(self):
+        captured_options = {}
+
+        class FakeYDL:
+            def __init__(self, options):
+                captured_options.update(options)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def extract_info(self, _url, download=False):
+                return {"title": "Other", "extractor": "Generic"}
+
+        info = extract_preview_info("https://example.com/video/1", ydl_factory=FakeYDL)
+
+        self.assertEqual(info.title, "Other")
+        self.assertNotIn("headers", captured_options)
+        self.assertNotIn("http_headers", captured_options)
+
+    def test_preview_source_uses_title_fallback_for_blank_metadata(self):
+        class FakeYDL:
+            def __init__(self, _options):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def extract_info(self, _url, download=False):
+                return {}
+
+        info = extract_preview_info("https://example.com/path/fallback-video", ydl_factory=FakeYDL)
+
+        self.assertEqual(info.title, "fallback-video")
+        self.assertEqual(info.source, "网页视频")
+
     def test_main_platform_smoke_test_file_runs_without_tk_and_writes_diagnostics(self):
         with TemporaryDirectory() as tmpdir:
             marker = Path(tmpdir) / "platform-smoke.txt"

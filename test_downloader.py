@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,6 +12,7 @@ from downloader import (
     build_yt_dlp_options,
     discover_candidates,
     download_resolved_video,
+    download_direct,
     extract_cctv_video_center_id,
     parse_hls_master,
     platform_http_headers,
@@ -244,12 +246,13 @@ class DownloaderDiscoveryTests(unittest.TestCase):
         fake = FakeYDL.instances[0]
         self.assertEqual(fake.calls, [("https://www.bilibili.com/video/BV1jL5F6PEog/", True)])
         self.assertEqual(
-            fake.options.get("http_headers"),
+            fake.options.get("headers"),
             {
                 "Origin": "https://www.bilibili.com",
                 "Referer": "https://www.bilibili.com/",
             },
         )
+        self.assertNotIn("http_headers", fake.options)
 
     def test_platform_http_headers_matches_only_bilibili_hosts(self):
         expected = {
@@ -274,6 +277,90 @@ class DownloaderDiscoveryTests(unittest.TestCase):
         for url in rejected_urls:
             with self.subTest(url=url, expected_headers=False):
                 self.assertEqual(platform_http_headers(url), {})
+
+    def test_bilibili_resolve_uses_public_api_without_fetching_page(self):
+        calls = []
+
+        def fake_http_get(url, **_kwargs):
+            calls.append(url)
+            if "x/web-interface/view" in url:
+                return (
+                    b'{"code":0,"data":{"bvid":"BV1jL5F6PEog","cid":38779030352,'
+                    b'"title":"Bili title","pic":"http://i.example.test/cover.jpg"}}'
+                )
+            if "x/player/wbi/playurl" in url:
+                self.assertIn("bvid=BV1jL5F6PEog", url)
+                self.assertIn("cid=38779030352", url)
+                return (
+                    b'{"code":0,"data":{"durl":[{"url":"https://upos.example.test/video.mp4"}]}}'
+                )
+            raise AssertionError(f"unexpected fetch: {url}")
+
+        with patch("downloader.http_get", side_effect=fake_http_get):
+            video = resolve_url("https://www.bilibili.com/video/BV1jL5F6PEog/")
+
+        self.assertEqual(video.kind, "direct-video")
+        self.assertEqual(video.source, "bilibili-api")
+        self.assertEqual(video.title, "Bili title")
+        self.assertEqual(video.url, "https://upos.example.test/video.mp4")
+        self.assertEqual(len(calls), 2)
+
+    def test_bilivideo_direct_download_sends_bilibili_referer(self):
+        captured_headers = {}
+
+        class FakeResponse(BytesIO):
+            headers = {"Content-Length": "11"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        def fake_urlopen(request, timeout=60):
+            captured_headers.update(dict(request.header_items()))
+            self.assertEqual(timeout, 60)
+            return FakeResponse(b"video-bytes")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("downloader.urlopen", side_effect=fake_urlopen):
+                result = download_direct(
+                    "https://upos.example.bilivideo.com/path/video.mp4?token=1",
+                    Path(tmpdir),
+                    "clip",
+                )
+
+        self.assertEqual(result.name, "clip.mp4")
+        self.assertEqual(captured_headers["User-agent"], downloader.USER_AGENT)
+        self.assertEqual(captured_headers["Origin"], "https://www.bilibili.com")
+        self.assertEqual(captured_headers["Referer"], "https://www.bilibili.com/")
+
+    def test_bilivideo_direct_headers_use_full_chrome_user_agent(self):
+        headers = downloader.direct_download_headers("https://upos.example.bilivideo.com/path/video.mp4")
+
+        self.assertIn("Chrome/126.0.0.0", headers["User-Agent"])
+
+    def test_direct_download_rejects_incomplete_response(self):
+        class FakeResponse(BytesIO):
+            headers = {"Content-Length": "20"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("downloader.urlopen", return_value=FakeResponse(b"short")):
+                with self.assertRaises(DownloadError) as cm:
+                    download_direct(
+                        "https://cdn.example.test/video.mp4",
+                        Path(tmpdir),
+                        "clip",
+                    )
+            self.assertFalse((Path(tmpdir) / "clip.mp4").exists())
+
+        self.assertIn("下载不完整", str(cm.exception))
 
     def test_unrelated_platform_video_does_not_add_bilibili_headers(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -315,6 +402,7 @@ class DownloaderDiscoveryTests(unittest.TestCase):
         self.assertEqual(result, final_path)
         self.assertEqual(len(FakeYDL.instances), 1)
         fake = FakeYDL.instances[0]
+        self.assertNotIn("headers", fake.options)
         self.assertNotIn("http_headers", fake.options)
 
     def test_platform_video_download_uses_new_base_when_sibling_media_exists(self):
@@ -546,11 +634,11 @@ class DownloaderDiscoveryTests(unittest.TestCase):
     def test_falls_back_to_platform_downloader_when_html_has_no_direct_media(self):
         html = b"<html><head><title>Platform clip</title></head><body></body></html>"
         with patch("downloader.http_get", return_value=html):
-            video = resolve_url("https://www.bilibili.com/video/BV1jL5F6PEog/")
+            video = resolve_url("https://example.com/watch/abc")
 
         self.assertEqual(video.kind, "platform-video")
         self.assertEqual(video.source, "yt-dlp")
-        self.assertEqual(video.url, "https://www.bilibili.com/video/BV1jL5F6PEog/")
+        self.assertEqual(video.url, "https://example.com/watch/abc")
 
 
 if __name__ == "__main__":

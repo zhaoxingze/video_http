@@ -12,6 +12,10 @@ python -m PyInstaller `
   --collect-all yt_dlp `
   --collect-binaries imageio_ffmpeg `
   --hidden-import imageio_ffmpeg `
+  --exclude-module numpy `
+  --exclude-module mkl `
+  --exclude-module scipy `
+  --exclude-module pandas `
   app_gui.py
 
 if ($LASTEXITCODE -ne 0) {
