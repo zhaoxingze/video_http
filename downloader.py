@@ -18,6 +18,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlencode, urljoin, urlparse
 from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
+from tencent_meeting import (
+    TENCENT_WEBVIEW_USER_AGENT,
+    TencentMeetingMedia,
+    resolve_tencent_media_with_browser,
+)
+
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -33,6 +39,7 @@ BILIBILI_HTTP_HEADERS = {
 }
 BILIBILI_DIRECT_DOMAINS = ("bilibili.com", "bilivideo.com", "hdslb.com", "biliimg.com")
 BILIBILI_BVID_RE = re.compile(r"\b(BV[0-9A-Za-z]{10})\b")
+TENCENT_MEETING_PATH_RE = re.compile(r"^/(?:crm|cw)/(?P<code>[0-9A-Za-z_-]+)", re.IGNORECASE)
 MEDIA_RE = re.compile(
     r"(?P<url>(?:(?:https?:)?//|/)[^'\"\s<>\\]+?"
     r"\.(?:mp4|m4v|mov|webm|flv|m3u8)(?:\?[^'\"\s<>\\]*)?)",
@@ -193,6 +200,20 @@ def is_hls_url(url: str) -> bool:
 def is_video_url(url: str) -> bool:
     path = urlparse(url).path.lower()
     return path.endswith(VIDEO_EXTENSIONS) or is_hls_url(url)
+
+
+def normalize_tencent_meeting_url(url: str) -> str | None:
+    parsed = urlparse(url.strip())
+    if not hostname_matches_domain(parsed.hostname, "meeting.tencent.com"):
+        return None
+    match = TENCENT_MEETING_PATH_RE.match(parsed.path)
+    if not match:
+        return None
+    return f"https://meeting.tencent.com/cw/{match.group('code')}"
+
+
+def is_tencent_meeting_url(url: str) -> bool:
+    return normalize_tencent_meeting_url(url) is not None
 
 
 def anchor_looks_like_download(anchor: dict[str, object]) -> bool:
@@ -397,6 +418,14 @@ def resolve_url(url: str) -> ResolvedVideo:
         return ResolvedVideo(url, "hls", filename_from_url(url), "input-url")
     if is_video_url(url):
         return ResolvedVideo(url, "direct-video", filename_from_url(url), "input-url")
+    tencent_url = normalize_tencent_meeting_url(url)
+    if tencent_url:
+        return ResolvedVideo(
+            tencent_url,
+            "tencent-meeting",
+            filename_from_url(tencent_url),
+            "tencent-webview",
+        )
     if bilibili_bvid_from_url(url):
         return resolve_bilibili_video(url)
     video, _html = resolve_page_video(url)
@@ -411,6 +440,14 @@ def download_resolved_video(
     progress_callback: ProgressCallback | None = None,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
+    if video.kind == "tencent-meeting":
+        return download_tencent_meeting(
+            video.url,
+            output_dir,
+            output_name,
+            fallback_title=video.title,
+            progress_callback=progress_callback,
+        )
     base_name = sanitize_filename(output_name or video.title or filename_from_url(video.url) or "downloaded_video")
 
     if video.kind == "platform-video":
@@ -418,6 +455,43 @@ def download_resolved_video(
     if video.kind == "hls":
         return download_hls(video.url, output_dir, base_name, progress_callback=progress_callback)
     return download_direct(video.url, output_dir, base_name, progress_callback=progress_callback)
+
+
+def download_tencent_meeting(
+    page_url: str,
+    output_dir: Path,
+    output_name: str | None,
+    *,
+    fallback_title: str = "",
+    media_resolver: Callable[[str], object] = resolve_tencent_media_with_browser,
+    progress_callback: ProgressCallback | None = None,
+) -> Path:
+    try:
+        media = media_resolver(page_url)
+    except (RuntimeError, ValueError, OSError) as exc:
+        raise DownloadError(
+            "腾讯会议视频读取失败。请在弹出的登录窗口中完成登录并确认该账号有权观看此录制。"
+        ) from exc
+    media_url = str(getattr(media, "media_url", "") or getattr(media, "url", ""))
+    media_title = str(getattr(media, "title", ""))
+    cookie_header = str(getattr(media, "cookie_header", ""))
+    base_name = sanitize_filename(
+        output_name or media_title or fallback_title or filename_from_url(page_url) or "tencent_meeting"
+    )
+    headers = {
+        "Origin": "https://meeting.tencent.com",
+        "Referer": page_url,
+        "User-Agent": TENCENT_WEBVIEW_USER_AGENT,
+    }
+    if cookie_header:
+        headers["Cookie"] = cookie_header
+    return download_direct(
+        media_url,
+        output_dir,
+        base_name,
+        headers=headers,
+        progress_callback=progress_callback,
+    )
 
 
 def build_yt_dlp_options(output_dir: Path, base_name: str, ffmpeg: str) -> dict[str, object]:
@@ -743,11 +817,15 @@ def download_direct(
     output_dir: Path,
     base_name: str,
     *,
+    headers: dict[str, str] | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> Path:
     suffix = Path(urlparse(url).path).suffix or ".mp4"
     output_path = unique_path(output_dir / f"{base_name}{suffix}")
-    req = Request(url, headers=direct_download_headers(url))
+    request_headers = direct_download_headers(url)
+    if headers:
+        request_headers.update(headers)
+    req = Request(url, headers=request_headers)
     with open_url(req, timeout=60) as response, output_path.open("wb") as target:
         total = int(response.headers.get("Content-Length", "0") or 0)
         downloaded = 0

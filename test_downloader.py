@@ -13,8 +13,11 @@ from downloader import (
     discover_candidates,
     download_resolved_video,
     download_direct,
+    download_tencent_meeting,
     extract_cctv_video_center_id,
     http_get,
+    is_tencent_meeting_url,
+    normalize_tencent_meeting_url,
     parse_hls_master,
     platform_http_headers,
     resolve_url,
@@ -39,6 +42,20 @@ class DownloaderDiscoveryTests(unittest.TestCase):
         self.assertIn("datas += tmp_ret[0]", spec_text)
         self.assertIn("binaries += tmp_ret[1]", spec_text)
         self.assertIn("hiddenimports += tmp_ret[2]", spec_text)
+
+    def test_build_script_collects_pywebview_assets(self):
+        build_script = Path(__file__).with_name("build_app.ps1").read_text(encoding="utf-8")
+        spec_text = Path(__file__).with_name("VideoDownloaderApp.spec").read_text(encoding="utf-8")
+        requirements = Path(__file__).with_name("requirements.txt").read_text(encoding="utf-8")
+
+        self.assertIn("--collect-data webview", build_script)
+        self.assertIn("--collect-binaries webview", build_script)
+        self.assertIn("--hidden-import webview.platforms.winforms", build_script)
+        self.assertIn("--exclude-module webview.platforms.qt", build_script)
+        self.assertIn("collect_data_files('webview')", spec_text)
+        self.assertIn("collect_dynamic_libs('webview')", spec_text)
+        self.assertNotIn("collect_all('webview')", spec_text)
+        self.assertIn("pywebview", requirements.lower())
 
     def test_prefers_explicit_download_anchor(self):
         html = """
@@ -710,6 +727,82 @@ class DownloaderDiscoveryTests(unittest.TestCase):
         self.assertEqual(video.kind, "platform-video")
         self.assertEqual(video.source, "yt-dlp")
         self.assertEqual(video.url, "https://example.com/watch/abc")
+
+    def test_normalizes_tencent_meeting_share_links(self):
+        self.assertTrue(is_tencent_meeting_url("https://meeting.tencent.com/crm/KD9ZEJ3B7a"))
+        self.assertTrue(is_tencent_meeting_url("https://meeting.tencent.com/cw/KD9ZEJ3B7a"))
+        self.assertEqual(
+            normalize_tencent_meeting_url("https://meeting.tencent.com/crm/KD9ZEJ3B7a"),
+            "https://meeting.tencent.com/cw/KD9ZEJ3B7a",
+        )
+
+    def test_tencent_meeting_resolves_before_generic_html_discovery(self):
+        with patch("downloader.http_get", side_effect=AssertionError("HTML fallback must not run")):
+            video = resolve_url("https://meeting.tencent.com/crm/KD9ZEJ3B7a")
+
+        self.assertEqual(video.kind, "tencent-meeting")
+        self.assertEqual(video.source, "tencent-webview")
+        self.assertEqual(video.title, "KD9ZEJ3B7a")
+        self.assertEqual(video.url, "https://meeting.tencent.com/cw/KD9ZEJ3B7a")
+
+    def test_tencent_meeting_download_uses_browser_media_and_progress(self):
+        progress = object()
+        page_url = "https://meeting.tencent.com/cw/KD9ZEJ3B7a"
+        media = downloader.TencentMeetingMedia(
+            media_url="https://ylz.cos.meeting.tencent.com/cos/example/recording.mp4?token=test",
+            title="Meeting lesson",
+            cookie_header="meeting_auth=secret",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            expected = output_dir / "Meeting lesson.mp4"
+            with patch("downloader.download_direct", return_value=expected) as mocked:
+                result = download_tencent_meeting(
+                    page_url,
+                    output_dir,
+                    None,
+                    fallback_title="KD9ZEJ3B7a",
+                    media_resolver=lambda _url: media,
+                    progress_callback=progress,
+                )
+
+        self.assertEqual(result, expected)
+        mocked.assert_called_once_with(
+            media.media_url,
+            output_dir,
+            "Meeting lesson",
+            headers={
+                "Cookie": "meeting_auth=secret",
+                "Origin": "https://meeting.tencent.com",
+                "Referer": page_url,
+                "User-Agent": downloader.TENCENT_WEBVIEW_USER_AGENT,
+            },
+            progress_callback=progress,
+        )
+
+    def test_tencent_meeting_video_dispatches_to_browser_adapter(self):
+        video = ResolvedVideo(
+            "https://meeting.tencent.com/cw/KD9ZEJ3B7a",
+            "tencent-meeting",
+            "KD9ZEJ3B7a",
+            "tencent-webview",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            expected = output_dir / "lesson.mp4"
+            with patch("downloader.download_tencent_meeting", return_value=expected) as mocked:
+                result = download_resolved_video(video, output_dir, "lesson")
+
+        self.assertEqual(result, expected)
+        mocked.assert_called_once_with(
+            video.url,
+            output_dir,
+            "lesson",
+            fallback_title=video.title,
+            progress_callback=None,
+        )
 
 
 if __name__ == "__main__":

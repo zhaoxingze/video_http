@@ -31,6 +31,7 @@ from downloader import (
     resolve_url,
     sanitize_filename,
 )
+from tencent_meeting import run_tencent_browser_helper
 
 
 APP_TITLE = "网页视频下载器"
@@ -751,7 +752,14 @@ class VideoDownloaderApp:
     def _download_worker(self, url: str, output_dir: Path, output_name: str | None) -> None:
         try:
             video = resolve_url(url)
-            self.queue.put(("status", f"已找到视频源：{video.source}\n类型：{video.kind}\n正在下载..."))
+            if video.kind == "tencent-meeting":
+                status = (
+                    "已识别腾讯会议录制。\n"
+                    "请在弹出的登录窗口中完成登录；登录成功并读取到视频后会自动开始下载。"
+                )
+            else:
+                status = f"已找到视频源：{video.source}\n类型：{video.kind}\n正在下载..."
+            self.queue.put(("status", status))
             def progress_callback(done: int, total: int) -> None:
                 self.queue.put(("progress", (done, total)))
 
@@ -884,6 +892,11 @@ def platform_runtime_smoke_diagnostics() -> str:
     except Exception as exc:
         raise RuntimeError(f"Platform runtime missing yt-dlp: {exc}") from exc
 
+    try:
+        import webview  # type: ignore
+    except Exception as exc:
+        raise RuntimeError(f"Platform runtime missing pywebview: {exc}") from exc
+
     ffmpeg = find_ffmpeg()
     if not ffmpeg:
         raise RuntimeError("Platform runtime missing ffmpeg executable path.")
@@ -900,11 +913,18 @@ def platform_runtime_smoke_diagnostics() -> str:
         version_text = "unknown"
 
     _ = YoutubeDL
-    return f"yt-dlp={version_text}\nffmpeg={ffmpeg_path.resolve()}"
+    webview_version = getattr(webview, "__version__", None) or "available"
+    return (
+        f"yt-dlp={version_text}\n"
+        f"ffmpeg={ffmpeg_path.resolve()}\n"
+        f"pywebview={webview_version}"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = argv if argv is not None else sys.argv[1:]
+    if len(argv) == 3 and argv[0] == "--tencent-browser-helper":
+        return run_tencent_browser_helper(argv[1], Path(argv[2]))
     if "--smoke-test" in argv:
         return smoke_test()
     for index, arg in enumerate(argv):

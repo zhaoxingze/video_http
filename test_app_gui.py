@@ -181,6 +181,26 @@ class AppGuiHelperTests(unittest.TestCase):
             diagnostics = marker.read_text(encoding="utf-8")
             self.assertIn("yt-dlp", diagnostics)
             self.assertIn("ffmpeg", diagnostics)
+            self.assertIn("pywebview", diagnostics)
+
+    def test_main_tencent_browser_helper_runs_without_tk(self):
+        with TemporaryDirectory() as tmpdir:
+            marker = Path(tmpdir) / "tencent-result.json"
+            with patch("app_gui.tk.Tk", side_effect=AssertionError("Tk should not be created")):
+                with patch("app_gui.run_tencent_browser_helper", return_value=0) as mocked:
+                    exit_code = main(
+                        [
+                            "--tencent-browser-helper",
+                            "https://meeting.tencent.com/cw/KD9ZEJ3B7a",
+                            str(marker),
+                        ]
+                    )
+
+            self.assertEqual(exit_code, 0)
+            mocked.assert_called_once_with(
+                "https://meeting.tencent.com/cw/KD9ZEJ3B7a",
+                marker,
+            )
 
     def test_is_probable_url_accepts_http_urls(self):
         self.assertTrue(is_probable_url("https://news.cctv.com/example.shtml"))

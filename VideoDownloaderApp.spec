@@ -1,10 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import collect_dynamic_libs
 from PyInstaller.utils.hooks import collect_all
 
 datas = [('.\\assets', 'assets')]
 binaries = []
-hiddenimports = ['imageio_ffmpeg']
+hiddenimports = ['webview.platforms.winforms', 'webview.platforms.edgechromium', 'imageio_ffmpeg']
+datas += collect_data_files('webview')
+binaries += collect_dynamic_libs('webview')
 binaries += collect_dynamic_libs('imageio_ffmpeg')
 tmp_ret = collect_all('yt_dlp')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
@@ -19,7 +22,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['numpy', 'mkl', 'scipy', 'pandas'],
+    excludes=['numpy', 'mkl', 'scipy', 'pandas', 'qtpy', 'PyQt5', 'PySide6', 'webview.platforms.qt', 'webview.platforms.gtk', 'webview.platforms.cocoa', 'webview.platforms.android', 'webview.platforms.cef'],
     noarchive=False,
     optimize=0,
 )
